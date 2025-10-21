@@ -71,25 +71,19 @@ token_manager = GitHubTokenManager(GITHUB_TOKENS)
 
 # === Request Throttler for FreeFire API ===
 class RequestThrottler:
-    def __init__(self, max_concurrent=5, delay_between_batches=0.5):
+    def __init__(self, max_concurrent=3, delay_between_requests=0.3):
         self.max_concurrent = max_concurrent
-        self.delay_between_batches = delay_between_batches
-        self.last_request_time = 0
+        self.delay_between_requests = delay_between_requests
         self.semaphore = asyncio.Semaphore(max_concurrent)
     
     async def throttle_request(self, coro):
         async with self.semaphore:
-            # Add delay between requests to avoid overwhelming the server
-            current_time = time.time()
-            elapsed = current_time - self.last_request_time
-            if elapsed < self.delay_between_batches:
-                await asyncio.sleep(self.delay_between_batches - elapsed)
-            
-            self.last_request_time = time.time()
+            # Add small delay between requests
+            await asyncio.sleep(self.delay_between_requests)
             return await coro
 
 # Initialize request throttler
-request_throttler = RequestThrottler(max_concurrent=3, delay_between_batches=0.3)  # Reduced concurrency
+request_throttler = RequestThrottler(max_concurrent=3, delay_between_requests=0.3)
 
 # === GitHub configuration ===
 MAIN_REPO_OWNER = "PWRSHAHEEDKALA"
@@ -396,7 +390,7 @@ def get_token_range_for_server(server_name):
         # Return empty list as fallback
         return []
 
-# === ENHANCED REQUEST FUNCTIONS WITH THROTTLING ===
+# === ORIGINAL FUNCTIONS WITH THROTTLING ONLY ===
 def encrypt_message(plaintext):
     try:
         key_bytes = b'Yg&tc%DEuh6%Zc^8'
@@ -449,49 +443,15 @@ async def send_request(encrypted_uid, token, url):
             'X-GA': "v1 1",
             'ReleaseVersion': "OB50"
         }
-        
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=edata, headers=headers) as response:
                 if response.status != 200:
                     app.logger.error(f"Request failed with status: {response.status}")
-                    return {"status": response.status, "success": False}
-                response_text = await response.text()
-                return {"status": 200, "success": True, "response": response_text}
+                    return response.status
+                return await response.text()
     except Exception as e:
         app.logger.error(f"Exception in send_request: {e}")
-        return {"status": 0, "success": False, "error": str(e)}
-
-async def send_batch_requests(encrypted_uid, tokens, url, batch_size=3, batch_delay=0.5):
-    """Send requests in smaller batches with delays between batches"""
-    successful_requests = 0
-    failed_requests = 0
-    
-    for i in range(0, len(tokens), batch_size):
-        batch_tokens = tokens[i:i + batch_size]
-        batch_tasks = []
-        
-        # Create tasks for current batch
-        for token in batch_tokens:
-            task = request_throttler.throttle_request(send_request(encrypted_uid, token, url))
-            batch_tasks.append(task)
-        
-        # Execute current batch
-        batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
-        
-        # Process batch results
-        for result in batch_results:
-            if isinstance(result, dict) and result.get("success"):
-                successful_requests += 1
-            else:
-                failed_requests += 1
-        
-        app.logger.info(f"Batch completed: {successful_requests} successful, {failed_requests} failed so far")
-        
-        # Add delay between batches unless it's the last batch
-        if i + batch_size < len(tokens):
-            await asyncio.sleep(batch_delay)
-    
-    return successful_requests, failed_requests
+        return None
 
 async def send_multiple_requests(uid, server_name, url):
     try:
@@ -504,20 +464,23 @@ async def send_multiple_requests(uid, server_name, url):
         if encrypted_uid is None:
             app.logger.error("Encryption failed.")
             return None
-        
+        tasks = []
         tokens = get_token_range_for_server(server_name)
         if tokens is None or len(tokens) == 0:
             app.logger.error("Failed to load tokens from the specified range.")
             return None
         
-        app.logger.info(f"Sending {len(tokens)} requests for {server_name} in batches")
+        app.logger.info(f"Sending {len(tokens)} requests for {server_name} with throttling")
         
-        # Send requests in controlled batches
-        successful, failed = await send_batch_requests(encrypted_uid, tokens, url, batch_size=3, batch_delay=0.5)
-        
-        app.logger.info(f"Request completion: {successful} successful, {failed} failed")
-        return {"successful": successful, "failed": failed}
-        
+        # Send requests using the filtered token range WITH THROTTLING
+        for i in range(len(tokens)):
+            token = tokens[i]
+            # Throttle each request
+            task = request_throttler.throttle_request(send_request(encrypted_uid, token, url))
+            tasks.append(task)
+            
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return results
     except Exception as e:
         app.logger.error(f"Exception in send_multiple_requests: {e}")
         return None
@@ -565,7 +528,7 @@ def decode_protobuf(binary):
         app.logger.error(f"Unexpected error during protobuf decoding: {e}")
         return None
 
-# === Main /like Endpoint ===
+# === Main /like Endpoint (ORIGINAL RESPONSE FORMAT) ===
 @app.route('/like', methods=['GET'])
 def handle_requests():
     uid = request.args.get("uid")
@@ -574,19 +537,12 @@ def handle_requests():
         return jsonify({"error": "UID and server_name are required"}), 400
 
     try:
-        # Add a startup delay to prevent rapid successive requests
-        time.sleep(1)
-        
         def process_request():
             app.logger.info(f"Starting request processing for UID: {uid}, Server: {server_name}")
             
-            # Get current counter WITH retry logic
-            try:
-                current_counter = get_counter(server_name)
-            except Exception as e:
-                app.logger.error(f"Failed to get counter: {e}")
-                # Use a default counter value as fallback
-                current_counter = 0
+            # Get current counter BEFORE processing
+            current_counter = get_counter(server_name)
+            app.logger.info(f"Current counter for {server_name}: {current_counter}")
             
             tokens_all = token_cache.get_tokens(server_name)
             if tokens_all is None:
@@ -621,7 +577,7 @@ def handle_requests():
                 url = "https://clientbp.ggblueshark.com/LikeProfile"
 
             # Perform like requests asynchronously using tokens from a specified bucket/range
-            like_results = asyncio.run(send_multiple_requests(uid, server_name, url))
+            asyncio.run(send_multiple_requests(uid, server_name, url))
 
             after = make_request(encrypted_uid, server_name, token)
             if after is None:
@@ -642,9 +598,7 @@ def handle_requests():
                 "LikesafterCommand": after_like,
                 "PlayerNickname": player_name,
                 "UID": player_uid,
-                "status": status,
-                "requests_sent": like_results.get("successful", 0) if like_results else 0,
-                "requests_failed": like_results.get("failed", 0) if like_results else 0
+                "status": status
             }
             app.logger.info(f"Request processed successfully for UID: {uid}. Result: {result}")
             
@@ -652,13 +606,10 @@ def handle_requests():
             if status == 1:
                 new_counter = current_counter + 1
                 app.logger.info(f"Updating counter for {server_name} from {current_counter} to {new_counter}")
-                try:
-                    if update_counter(server_name, new_counter):
-                        app.logger.info(f"Successfully updated counter for {server_name} to {new_counter} in counter repo")
-                    else:
-                        app.logger.error(f"Failed to update counter for {server_name} in counter repo")
-                except Exception as e:
-                    app.logger.error(f"Error updating counter: {e}")
+                if update_counter(server_name, new_counter):
+                    app.logger.info(f"Successfully updated counter for {server_name} to {new_counter} in counter repo")
+                else:
+                    app.logger.error(f"Failed to update counter for {server_name} in counter repo")
             else:
                 app.logger.info(f"No likes given, counter remains at {current_counter}")
                 
@@ -675,5 +626,5 @@ def home():
     return jsonify({"message": "Like Bot API is running!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with ENHANCED REQUEST THROTTLING and BATCH PROCESSING!")
+    app.logger.info("🚀 Server started with REQUEST THROTTLING (original response format preserved)!")
     app.run(debug=True, host='0.0.0.0', port=5001)
