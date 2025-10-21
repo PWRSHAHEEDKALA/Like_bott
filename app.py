@@ -12,6 +12,7 @@ from Crypto.Util.Padding import pad
 from google.protobuf.json_format import MessageToJson
 from google.protobuf.message import DecodeError
 import random
+from functools import wraps
 
 app = Flask(__name__)
 
@@ -49,20 +50,87 @@ MAIN_REPO_NAME = "Like_bott"
 COUNTER_REPO_OWNER = "PWRSHAHEEDKALA"
 COUNTER_REPO_NAME = "Telegram-likebot"
 
+# === DOWNLOAD PROTOBUF FILES FIRST ===
+def download_protobuf_files():
+    """Download required protobuf files"""
+    protobuf_files = {
+        "like_pb2.py": "like_pb2.py",
+        "like_count_pb2.py": "like_count_pb2.py", 
+        "uid_generator_pb2.py": "uid_generator_pb2.py"
+    }
+    
+    for filename, github_path in protobuf_files.items():
+        if not os.path.exists(filename):
+            app.logger.info(f"Downloading {filename}...")
+            headers = {
+                "Authorization": f"Bearer {GITHUB_TOKENS[0]}",
+                "Accept": "application/vnd.github.v3.raw",
+            }
+            url = f"https://api.github.com/repos/{MAIN_REPO_OWNER}/{MAIN_REPO_NAME}/contents/{github_path}"
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                with open(filename, "w") as f:
+                    f.write(response.text)
+                app.logger.info(f"✅ Downloaded {filename}")
+            else:
+                app.logger.error(f"❌ Failed to download {filename}: {response.status_code}")
+
+# Download protobuf files first
+download_protobuf_files()
+
+# Now import the protobuf files
+try:
+    import like_pb2
+    import like_count_pb2
+    import uid_generator_pb2
+    app.logger.info("✅ All protobuf files imported successfully")
+except ImportError as e:
+    app.logger.error(f"❌ Failed to import protobuf files: {e}")
+
+# === DOWNLOAD ONLY EXISTING TOKEN FILES ===
+def download_existing_token_files():
+    """Download only the token files that exist in the repo"""
+    # Only these token files exist in your repo
+    existing_token_files = [
+        "token_ind.json",
+        "token_bd.json",
+        "token_br.json"
+        # Removed token_vn.json and token_eu.json as they don't exist
+    ]
+    
+    for file_name in existing_token_files:
+        if not os.path.exists(file_name):
+            app.logger.info(f"Downloading {file_name}...")
+            headers = {
+                "Authorization": f"Bearer {GITHUB_TOKENS[0]}",
+                "Accept": "application/vnd.github.v3.raw",
+            }
+            url = f"https://api.github.com/repos/{MAIN_REPO_OWNER}/{MAIN_REPO_NAME}/contents/{file_name}"
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                with open(file_name, "w") as f:
+                    f.write(response.text)
+                app.logger.info(f"✅ Downloaded {file_name}")
+            else:
+                app.logger.warning(f"⚠️ Could not download {file_name}: {response.status_code}")
+
+# Download existing token files
+download_existing_token_files()
+
 # === LOCAL TOKEN LOADING (NO GITHUB API NEEDED) ===
 def load_tokens_local(server_name):
     """Load tokens from local JSON files - NO GitHub API calls needed"""
     try:
+        # Map server names to existing token files
         if server_name == "IND":
             file_path = "token_ind.json"
-        elif server_name in {"ME", "EU", "SG", "NA", "BD"}:
+        elif server_name in {"BD", "ME", "EU", "SG", "NA"}:
             file_path = "token_bd.json"
-        elif server_name in {"BR", "cis"}:
+        elif server_name in {"BR", "cis", "US", "SAC"}:
             file_path = "token_br.json"
-        elif server_name == "VN":
-            file_path = "token_vn.json"
         else:
-            file_path = "token_eu.json"
+            # Default to BD tokens if server not specified
+            file_path = "token_bd.json"
             
         app.logger.info(f"Loading tokens locally from: {file_path}")
         
@@ -84,34 +152,6 @@ def load_tokens_local(server_name):
         app.logger.error(f"❌ Error loading local tokens for {server_name}: {e}")
         return None
 
-# === DOWNLOAD TOKEN FILES ONCE (Initial Setup) ===
-def download_token_files_once():
-    """Download token files once during startup if they don't exist"""
-    token_files = [
-        "token_ind.json", "token_bd.json", "token_br.json", 
-        "token_vn.json", "token_eu.json"
-    ]
-    
-    for file_name in token_files:
-        if not os.path.exists(file_name):
-            app.logger.info(f"Downloading {file_name} for first-time setup...")
-            # Use GitHub API just once to download the file
-            headers = {
-                "Authorization": f"Bearer {GITHUB_TOKENS[0]}",
-                "Accept": "application/vnd.github.v3.raw",
-            }
-            url = f"https://api.github.com/repos/{MAIN_REPO_OWNER}/{MAIN_REPO_NAME}/contents/{file_name}"
-            response = requests.get(url, headers=headers)
-            if response.status_code == 200:
-                with open(file_name, "w") as f:
-                    f.write(response.text)
-                app.logger.info(f"✅ Downloaded {file_name}")
-            else:
-                app.logger.error(f"❌ Failed to download {file_name}: {response.status_code}")
-
-# Download token files on startup (only if missing)
-download_token_files_once()
-
 # === COUNTER FUNCTIONS (Still need GitHub API for writes) ===
 def get_counter(server_name):
     """Get counter from GitHub - NEEDS API for reading remote counter"""
@@ -131,24 +171,29 @@ def get_counter(server_name):
         "Accept": "application/vnd.github.v3.raw",
     }
     url = f"https://api.github.com/repos/{COUNTER_REPO_OWNER}/{COUNTER_REPO_NAME}/contents/{file_path}"
-    response = requests.get(url, headers=headers)
     
-    if response.status_code == 200:
-        try:
-            content = response.text
-            data = json.loads(content)
-            counter_value = int(data.get("counter", 0))
-            app.logger.info(f"✅ Fetched counter for {server_name}: {counter_value}")
-            return counter_value
-        except Exception as e:
-            app.logger.error(f"❌ Error parsing counter for {server_name}: {e}")
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            try:
+                content = response.text
+                data = json.loads(content)
+                counter_value = int(data.get("counter", 0))
+                app.logger.info(f"✅ Fetched counter for {server_name}: {counter_value}")
+                return counter_value
+            except Exception as e:
+                app.logger.error(f"❌ Error parsing counter for {server_name}: {e}")
+                return 0
+        elif response.status_code == 404:
+            app.logger.info(f"Counter file {file_path} not found, creating with default 0")
+            update_counter(server_name, 0)
             return 0
-    elif response.status_code == 404:
-        app.logger.info(f"Counter file {file_path} not found, creating with default 0")
-        update_counter(server_name, 0)
-        return 0
-    else:
-        app.logger.error(f"❌ Error fetching counter for {server_name}: {response.status_code}")
+        else:
+            app.logger.error(f"❌ Error fetching counter for {server_name}: {response.status_code}")
+            return 0
+    except Exception as e:
+        app.logger.error(f"❌ Network error fetching counter: {e}")
         return 0
 
 def update_counter(server_name, new_value):
@@ -170,34 +215,38 @@ def update_counter(server_name, new_value):
         "Accept": "application/vnd.github.v3+json"
     }
     
-    # Get current file SHA
-    get_response = requests.get(url, headers=headers)
-    sha = None
-    if get_response.status_code == 200:
-        file_info = get_response.json()
-        sha = file_info["sha"]
-    
-    # Prepare update
-    content_data = {"counter": new_value}
-    content_json = json.dumps(content_data, indent=2)
-    new_content_b64 = base64.b64encode(content_json.encode()).decode()
-    
-    data = {
-        "message": f"Update {server_name} counter to {new_value}",
-        "content": new_content_b64
-    }
-    
-    if sha:
-        data["sha"] = sha
-    
-    app.logger.info(f"Updating counter for {server_name} to {new_value}")
-    put_response = requests.put(url, headers=headers, json=data)
-    
-    if put_response.status_code in [200, 201]:
-        app.logger.info(f"✅ Updated {server_name} counter to {new_value}")
-        return True
-    else:
-        app.logger.error(f"❌ Failed to update counter: {put_response.status_code}")
+    try:
+        # Get current file SHA
+        get_response = requests.get(url, headers=headers, timeout=10)
+        sha = None
+        if get_response.status_code == 200:
+            file_info = get_response.json()
+            sha = file_info["sha"]
+        
+        # Prepare update
+        content_data = {"counter": new_value}
+        content_json = json.dumps(content_data, indent=2)
+        new_content_b64 = base64.b64encode(content_json.encode()).decode()
+        
+        data = {
+            "message": f"Update {server_name} counter to {new_value}",
+            "content": new_content_b64
+        }
+        
+        if sha:
+            data["sha"] = sha
+        
+        app.logger.info(f"Updating counter for {server_name} to {new_value}")
+        put_response = requests.put(url, headers=headers, json=data, timeout=10)
+        
+        if put_response.status_code in [200, 201]:
+            app.logger.info(f"✅ Updated {server_name} counter to {new_value}")
+            return True
+        else:
+            app.logger.error(f"❌ Failed to update counter: {put_response.status_code}")
+            return False
+    except Exception as e:
+        app.logger.error(f"❌ Network error updating counter: {e}")
         return False
 
 # === UPDATED TOKEN RANGE FUNCTION ===
@@ -218,10 +267,12 @@ def get_token_range_for_server(server_name):
     
     app.logger.info(f"Token range for {server_name}: start={start}, end={end}, total_tokens={len(tokens_all)}")
     
+    # Handle case where start index exceeds available tokens
     if start >= len(tokens_all):
         app.logger.warning(f"Start index {start} exceeds token list, resetting counter")
         update_counter(server_name, 0)
-        return tokens_all[0:100]
+        start = 0
+        end = min(100, len(tokens_all))
     
     if end > len(tokens_all):
         end = len(tokens_all)
@@ -253,10 +304,7 @@ class TokenCache:
 # Initialize token cache
 token_cache = TokenCache()
 
-# === REST OF YOUR CODE REMAINS THE SAME ===
-# (encrypt_message, create_protobuf_message, create_protobuf, enc, send_request, 
-# send_multiple_requests, make_request, decode_protobuf, and the Flask route)
-
+# === ENCRYPTION AND PROTOBUF FUNCTIONS ===
 def encrypt_message(plaintext):
     try:
         key_bytes = b'Yg&tc%DEuh6%Zc^8'
@@ -483,6 +531,11 @@ def handle_requests():
     except Exception as e:
         app.logger.error(f"Error processing request: {e}")
         return jsonify({"error": str(e)}), 500
+
+# Root endpoint
+@app.route('/')
+def home():
+    return jsonify({"message": "Like Bot API is running!", "status": "active"})
 
 if __name__ == '__main__':
     app.logger.info("🚀 Server started with LOCAL token loading!")
