@@ -3,6 +3,7 @@ import urllib3
 import warnings
 import time
 from functools import wraps
+
 # Suppress all warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings("ignore")
@@ -25,29 +26,45 @@ app = Flask(__name__)
 
 # === MULTIPLE GitHub Tokens for Rotation ===
 GITHUB_TOKENS = [
-    "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",
+    "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",
     "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",
-    # Add more tokens here if needed
+    # Add more tokens from different GitHub accounts here
 ]
 
-# Token rotation manager
+# Enhanced GitHub Token Manager
 class GitHubTokenManager:
     def __init__(self, tokens):
         self.tokens = tokens
         self.current_index = 0
         self.last_used = 0
-        self.rate_limit_delay = 2  # 2 seconds between calls
+        self.rate_limit_delay = 3  # Increased to 3 seconds
+        self.failed_tokens = set()
         
     def get_token(self):
-        # Rate limiting
+        # Rate limiting between all calls
         elapsed = time.time() - self.last_used
         if elapsed < self.rate_limit_delay:
             time.sleep(self.rate_limit_delay - elapsed)
         
-        token = self.tokens[self.current_index]
-        self.current_index = (self.current_index + 1) % len(self.tokens)
+        # Find next working token
+        start_index = self.current_index
+        while True:
+            token = self.tokens[self.current_index]
+            self.current_index = (self.current_index + 1) % len(self.tokens)
+            
+            if token not in self.failed_tokens:
+                break
+                
+            # If we've tried all tokens and they're all failed
+            if self.current_index == start_index:
+                raise Exception("All GitHub tokens are rate limited")
+        
         self.last_used = time.time()
         return token
+    
+    def mark_token_failed(self, token):
+        self.failed_tokens.add(token)
+        app.logger.warning(f"Marked token as rate limited: {token[:10]}...")
 
 # Initialize token manager
 token_manager = GitHubTokenManager(GITHUB_TOKENS)
@@ -57,6 +74,29 @@ MAIN_REPO_OWNER = "PWRSHAHEEDKALA"
 MAIN_REPO_NAME = "Like_bott"
 COUNTER_REPO_OWNER = "PWRSHAHEEDKALA"
 COUNTER_REPO_NAME = "Telegram-likebot"
+
+# === File Caching System ===
+class FileCache:
+    def __init__(self, cache_dir=".cache", cache_duration=300):  # 5 minutes
+        self.cache_dir = cache_dir
+        self.cache_duration = cache_duration
+        os.makedirs(cache_dir, exist_ok=True)
+    
+    def get(self, key):
+        cache_file = os.path.join(self.cache_dir, f"{key}.json")
+        if os.path.exists(cache_file):
+            if time.time() - os.path.getmtime(cache_file) < self.cache_duration:
+                with open(cache_file, 'r') as f:
+                    return json.load(f)
+        return None
+    
+    def set(self, key, value):
+        cache_file = os.path.join(self.cache_dir, f"{key}.json")
+        with open(cache_file, 'w') as f:
+            json.dump(value, f)
+
+# Initialize file cache
+file_cache = FileCache()
 
 # === Rate Limiting Decorator ===
 def rate_limit(seconds):
@@ -76,13 +116,21 @@ def rate_limit(seconds):
 def github_api_with_backoff(func, max_retries=3):
     for retry in range(max_retries):
         try:
-            return func()
+            result = func()
+            return result
         except Exception as e:
-            if "rate limit" in str(e).lower() or "403" in str(e):
-                wait_time = (2 ** retry) + random.random()
+            error_str = str(e).lower()
+            if "rate limit" in error_str or "403" in error_str:
+                wait_time = (2 ** retry) + random.random() * 2
                 app.logger.warning(f"GitHub rate limit hit, retrying in {wait_time:.2f} seconds...")
+                
+                # If it's a 403, mark the current token as failed
+                if "403" in error_str:
+                    token_manager.mark_token_failed(token_manager.tokens[token_manager.current_index])
+                
                 time.sleep(wait_time)
             else:
+                app.logger.error(f"GitHub API error: {e}")
                 raise e
     raise Exception("Max retries exceeded for GitHub API")
 
@@ -117,24 +165,36 @@ import like_pb2
 import like_count_pb2
 import uid_generator_pb2
 
-# === GitHub File Fetching with Token Rotation ===
-@rate_limit(1)  # 1 second between GitHub API calls
+# === GitHub File Fetching with Token Rotation and Caching ===
+@rate_limit(2)  # Increased to 2 seconds
 def fetch_file_from_main_repo(file_path):
-    token = token_manager.get_token()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github.v3.raw",
-    }
-    url = f"https://api.github.com/repos/{MAIN_REPO_OWNER}/{MAIN_REPO_NAME}/contents/{file_path}"
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        return response.text
-    else:
-        app.logger.error(f"Error fetching file from main repo ({file_path}): {response.status_code} - {response.text}")
-        return None
+    # Check cache first
+    cached = file_cache.get(file_path)
+    if cached is not None:
+        app.logger.info(f"Using cached version of {file_path}")
+        return cached
+    
+    def fetch_attempt():
+        token = token_manager.get_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3.raw",
+        }
+        url = f"https://api.github.com/repos/{MAIN_REPO_OWNER}/{MAIN_REPO_NAME}/contents/{file_path}"
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            content = response.text
+            # Cache the content
+            file_cache.set(file_path, content)
+            return content
+        else:
+            app.logger.error(f"Error fetching file from main repo ({file_path}): {response.status_code} - {response.text}")
+            return None
+    
+    return github_api_with_backoff(fetch_attempt)
 
 # === COUNTER REPO FUNCTIONS with Token Rotation ===
-@rate_limit(1)
+@rate_limit(2)
 def get_counter(server_name):
     file_map = {
         "IND": "ind_remain.json", 
@@ -176,7 +236,7 @@ def get_counter(server_name):
     
     return github_api_with_backoff(get_counter_attempt)
 
-@rate_limit(1)
+@rate_limit(2)
 def update_counter(server_name, new_value):
     file_map = {
         "IND": "ind_remain.json", 
@@ -228,34 +288,6 @@ def update_counter(server_name, new_value):
             return False
     
     return github_api_with_backoff(update_counter_attempt)
-
-def get_token_range_for_server(server_name):
-    counter = get_counter(server_name)
-    app.logger.info(f"Current counter for {server_name}: {counter}")
-    
-    bucket = counter // 30  # Each bucket covers 30 uses
-    start = bucket * 100
-    end = start + 100
-    
-    tokens_all = load_tokens(server_name)
-    if not tokens_all:
-        app.logger.error(f"No tokens found for server {server_name}")
-        return []
-    
-    app.logger.info(f"Token range for {server_name}: start={start}, end={end}, total_tokens={len(tokens_all)}")
-    
-    # Ensure we don't go out of bounds
-    if start >= len(tokens_all):
-        app.logger.warning(f"Start index {start} exceeds token list length {len(tokens_all)}, resetting counter")
-        update_counter(server_name, 0)
-        return tokens_all[0:100]  # Return first 100 tokens
-    
-    if end > len(tokens_all):
-        end = len(tokens_all)
-    
-    token_range = tokens_all[start:end]
-    app.logger.info(f"Selected {len(token_range)} tokens for {server_name}")
-    return token_range
 
 # === Token Handling Functions ===
 def load_tokens(server_name):
@@ -309,34 +341,38 @@ class TokenCache:
 # Initialize token cache
 token_cache = TokenCache()
 
-# Update get_token_range_for_server to use cache
 def get_token_range_for_server(server_name):
-    counter = get_counter(server_name)
-    app.logger.info(f"Current counter for {server_name}: {counter}")
-    
-    bucket = counter // 30
-    start = bucket * 100
-    end = start + 100
-    
-    # Use cached tokens
-    tokens_all = token_cache.get_tokens(server_name)
-    if not tokens_all:
-        app.logger.error(f"No tokens found for server {server_name}")
+    try:
+        counter = get_counter(server_name)
+        app.logger.info(f"Current counter for {server_name}: {counter}")
+        
+        bucket = counter // 30
+        start = bucket * 100
+        end = start + 100
+        
+        # Use cached tokens
+        tokens_all = token_cache.get_tokens(server_name)
+        if not tokens_all:
+            app.logger.error(f"No tokens found for server {server_name}")
+            return []
+        
+        app.logger.info(f"Token range for {server_name}: start={start}, end={end}, total_tokens={len(tokens_all)}")
+        
+        if start >= len(tokens_all):
+            app.logger.warning(f"Start index {start} exceeds token list length {len(tokens_all)}, resetting counter")
+            update_counter(server_name, 0)
+            return tokens_all[0:100]
+        
+        if end > len(tokens_all):
+            end = len(tokens_all)
+        
+        token_range = tokens_all[start:end]
+        app.logger.info(f"Selected {len(token_range)} tokens for {server_name}")
+        return token_range
+    except Exception as e:
+        app.logger.error(f"Error getting token range for {server_name}: {e}")
+        # Return empty list as fallback
         return []
-    
-    app.logger.info(f"Token range for {server_name}: start={start}, end={end}, total_tokens={len(tokens_all)}")
-    
-    if start >= len(tokens_all):
-        app.logger.warning(f"Start index {start} exceeds token list length {len(tokens_all)}, resetting counter")
-        update_counter(server_name, 0)
-        return tokens_all[0:100]
-    
-    if end > len(tokens_all):
-        end = len(tokens_all)
-    
-    token_range = tokens_all[start:end]
-    app.logger.info(f"Selected {len(token_range)} tokens for {server_name}")
-    return token_range
 
 # === ALL YOUR ORIGINAL FUNCTIONS (unchanged) ===
 def encrypt_message(plaintext):
@@ -481,12 +517,19 @@ def handle_requests():
         return jsonify({"error": "UID and server_name are required"}), 400
 
     try:
+        # Add a startup delay to prevent rapid successive requests
+        time.sleep(1)
+        
         def process_request():
             app.logger.info(f"Starting request processing for UID: {uid}, Server: {server_name}")
             
-            # Get current counter BEFORE processing
-            current_counter = get_counter(server_name)
-            app.logger.info(f"Current counter for {server_name}: {current_counter}")
+            # Get current counter WITH retry logic
+            try:
+                current_counter = get_counter(server_name)
+            except Exception as e:
+                app.logger.error(f"Failed to get counter: {e}")
+                # Use a default counter value as fallback
+                current_counter = 0
             
             tokens_all = token_cache.get_tokens(server_name)
             if tokens_all is None:
@@ -550,10 +593,13 @@ def handle_requests():
             if status == 1:
                 new_counter = current_counter + 1
                 app.logger.info(f"Updating counter for {server_name} from {current_counter} to {new_counter}")
-                if update_counter(server_name, new_counter):
-                    app.logger.info(f"Successfully updated counter for {server_name} to {new_counter} in counter repo")
-                else:
-                    app.logger.error(f"Failed to update counter for {server_name} in counter repo")
+                try:
+                    if update_counter(server_name, new_counter):
+                        app.logger.info(f"Successfully updated counter for {server_name} to {new_counter} in counter repo")
+                    else:
+                        app.logger.error(f"Failed to update counter for {server_name} in counter repo")
+                except Exception as e:
+                    app.logger.error(f"Error updating counter: {e}")
             else:
                 app.logger.info(f"No likes given, counter remains at {current_counter}")
                 
@@ -570,5 +616,5 @@ def home():
     return jsonify({"message": "Like Bot API is running!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with RATE LIMITING and TOKEN ROTATION!")
+    app.logger.info("🚀 Server started with ENHANCED RATE LIMITING and TOKEN ROTATION!")
     app.run(debug=True, host='0.0.0.0', port=5001)
