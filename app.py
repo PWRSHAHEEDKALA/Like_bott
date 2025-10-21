@@ -1,6 +1,8 @@
 import os
 import urllib3
 import warnings
+import time
+from functools import wraps
 # Suppress all warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings("ignore")
@@ -21,30 +23,89 @@ import random
 
 app = Flask(__name__)
 
+# === MULTIPLE GitHub Tokens for Rotation ===
+GITHUB_TOKENS = [
+    "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",
+    "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",
+    # Add more tokens here if needed
+]
+
+# Token rotation manager
+class GitHubTokenManager:
+    def __init__(self, tokens):
+        self.tokens = tokens
+        self.current_index = 0
+        self.last_used = 0
+        self.rate_limit_delay = 2  # 2 seconds between calls
+        
+    def get_token(self):
+        # Rate limiting
+        elapsed = time.time() - self.last_used
+        if elapsed < self.rate_limit_delay:
+            time.sleep(self.rate_limit_delay - elapsed)
+        
+        token = self.tokens[self.current_index]
+        self.current_index = (self.current_index + 1) % len(self.tokens)
+        self.last_used = time.time()
+        return token
+
+# Initialize token manager
+token_manager = GitHubTokenManager(GITHUB_TOKENS)
+
 # === GitHub configuration ===
-GITHUB_TOKEN = "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"
 MAIN_REPO_OWNER = "PWRSHAHEEDKALA"
 MAIN_REPO_NAME = "Like_bott"
-
-# NEW: Separate repo for counters (create this repo)
 COUNTER_REPO_OWNER = "PWRSHAHEEDKALA"
-COUNTER_REPO_NAME = "Telegram-likebot"  # Make sure this repo exists
+COUNTER_REPO_NAME = "Telegram-likebot"
+
+# === Rate Limiting Decorator ===
+def rate_limit(seconds):
+    def decorator(func):
+        last_called = [0.0]
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            elapsed = time.time() - last_called[0]
+            if elapsed < seconds:
+                time.sleep(seconds - elapsed)
+            last_called[0] = time.time()
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+# === Exponential Backoff for GitHub API ===
+def github_api_with_backoff(func, max_retries=3):
+    for retry in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            if "rate limit" in str(e).lower() or "403" in str(e):
+                wait_time = (2 ** retry) + random.random()
+                app.logger.warning(f"GitHub rate limit hit, retrying in {wait_time:.2f} seconds...")
+                time.sleep(wait_time)
+            else:
+                raise e
+    raise Exception("Max retries exceeded for GitHub API")
 
 # Function to download a file from GitHub if it does not exist locally
 def download_file_if_missing(filename, github_path):
     if not os.path.exists(filename):
-        headers = {
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github.v3.raw",
-        }
-        url = f"https://api.github.com/repos/{MAIN_REPO_OWNER}/{MAIN_REPO_NAME}/contents/{github_path}"
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            with open(filename, "w") as f:
-                f.write(response.text)
-            app.logger.info(f"Downloaded {filename} from GitHub.")
-        else:
-            raise Exception(f"Failed to download {filename} from GitHub: {response.status_code} - {response.text}")
+        def download_attempt():
+            token = token_manager.get_token()
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github.v3.raw",
+            }
+            url = f"https://api.github.com/repos/{MAIN_REPO_OWNER}/{MAIN_REPO_NAME}/contents/{github_path}"
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                with open(filename, "w") as f:
+                    f.write(response.text)
+                app.logger.info(f"Downloaded {filename} from GitHub.")
+                return True
+            else:
+                raise Exception(f"Failed to download {filename} from GitHub: {response.status_code} - {response.text}")
+        
+        github_api_with_backoff(download_attempt)
 
 # Auto-download required protobuf files from the GitHub repo
 download_file_if_missing("like_pb2.py", "like_pb2.py")
@@ -56,10 +117,12 @@ import like_pb2
 import like_count_pb2
 import uid_generator_pb2
 
-# === GitHub File Fetching (for token files from MAIN repo) ===
+# === GitHub File Fetching with Token Rotation ===
+@rate_limit(1)  # 1 second between GitHub API calls
 def fetch_file_from_main_repo(file_path):
+    token = token_manager.get_token()
     headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github.v3.raw",
     }
     url = f"https://api.github.com/repos/{MAIN_REPO_OWNER}/{MAIN_REPO_NAME}/contents/{file_path}"
@@ -70,7 +133,8 @@ def fetch_file_from_main_repo(file_path):
         app.logger.error(f"Error fetching file from main repo ({file_path}): {response.status_code} - {response.text}")
         return None
 
-# === COUNTER REPO FUNCTIONS - FIXED ===
+# === COUNTER REPO FUNCTIONS with Token Rotation ===
+@rate_limit(1)
 def get_counter(server_name):
     file_map = {
         "IND": "ind_remain.json", 
@@ -82,32 +146,37 @@ def get_counter(server_name):
     }
     file_path = file_map.get(server_name, "bd_remain.json")
     
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3.raw",
-    }
-    url = f"https://api.github.com/repos/{COUNTER_REPO_OWNER}/{COUNTER_REPO_NAME}/contents/{file_path}"
-    response = requests.get(url, headers=headers)
-    
-    if response.status_code == 200:
-        try:
-            content = response.text
-            data = json.loads(content)
-            counter_value = int(data.get("counter", 0))
-            app.logger.info(f"Successfully fetched counter for {server_name}: {counter_value}")
-            return counter_value
-        except Exception as e:
-            app.logger.error(f"Error parsing counter for {server_name}: {e}")
+    def get_counter_attempt():
+        token = token_manager.get_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3.raw",
+        }
+        url = f"https://api.github.com/repos/{COUNTER_REPO_OWNER}/{COUNTER_REPO_NAME}/contents/{file_path}"
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            try:
+                content = response.text
+                data = json.loads(content)
+                counter_value = int(data.get("counter", 0))
+                app.logger.info(f"Successfully fetched counter for {server_name}: {counter_value}")
+                return counter_value
+            except Exception as e:
+                app.logger.error(f"Error parsing counter for {server_name}: {e}")
+                return 0
+        elif response.status_code == 404:
+            # File doesn't exist, create it
+            app.logger.info(f"Counter file {file_path} not found, creating new one with default value 0")
+            update_counter(server_name, 0)  # Create file with 0
             return 0
-    elif response.status_code == 404:
-        # File doesn't exist, create it
-        app.logger.info(f"Counter file {file_path} not found, creating new one with default value 0")
-        update_counter(server_name, 0)  # Create file with 0
-        return 0
-    else:
-        app.logger.error(f"Error fetching counter for {server_name}: {response.status_code} - {response.text}")
-        return 0
+        else:
+            app.logger.error(f"Error fetching counter for {server_name}: {response.status_code} - {response.text}")
+            return 0
+    
+    return github_api_with_backoff(get_counter_attempt)
 
+@rate_limit(1)
 def update_counter(server_name, new_value):
     file_map = {
         "IND": "ind_remain.json", 
@@ -119,42 +188,46 @@ def update_counter(server_name, new_value):
     }
     file_path = file_map.get(server_name, "bd_remain.json")
     
-    url = f"https://api.github.com/repos/{COUNTER_REPO_OWNER}/{COUNTER_REPO_NAME}/contents/{file_path}"
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
+    def update_counter_attempt():
+        token = token_manager.get_token()
+        url = f"https://api.github.com/repos/{COUNTER_REPO_OWNER}/{COUNTER_REPO_NAME}/contents/{file_path}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        # First, try to get the file to get its SHA (if it exists)
+        get_response = requests.get(url, headers=headers)
+        sha = None
+        if get_response.status_code == 200:
+            file_info = get_response.json()
+            sha = file_info["sha"]
+            app.logger.info(f"Found existing file with SHA: {sha}")
+        
+        # Prepare the content
+        content_data = {"counter": new_value}
+        content_json = json.dumps(content_data, indent=2)
+        new_content_b64 = base64.b64encode(content_json.encode()).decode()
+        
+        data = {
+            "message": f"Update {server_name} counter to {new_value}",
+            "content": new_content_b64
+        }
+        
+        if sha:
+            data["sha"] = sha
+        
+        app.logger.info(f"Updating counter for {server_name} to {new_value}")
+        put_response = requests.put(url, headers=headers, json=data)
+        
+        if put_response.status_code in [200, 201]:
+            app.logger.info(f"Successfully updated {server_name} counter to {new_value}")
+            return True
+        else:
+            app.logger.error(f"Failed to update counter {file_path}: {put_response.status_code} - {put_response.text}")
+            return False
     
-    # First, try to get the file to get its SHA (if it exists)
-    get_response = requests.get(url, headers=headers)
-    sha = None
-    if get_response.status_code == 200:
-        file_info = get_response.json()
-        sha = file_info["sha"]
-        app.logger.info(f"Found existing file with SHA: {sha}")
-    
-    # Prepare the content
-    content_data = {"counter": new_value}
-    content_json = json.dumps(content_data, indent=2)
-    new_content_b64 = base64.b64encode(content_json.encode()).decode()
-    
-    data = {
-        "message": f"Update {server_name} counter to {new_value}",
-        "content": new_content_b64
-    }
-    
-    if sha:
-        data["sha"] = sha
-    
-    app.logger.info(f"Updating counter for {server_name} to {new_value}")
-    put_response = requests.put(url, headers=headers, json=data)
-    
-    if put_response.status_code in [200, 201]:
-        app.logger.info(f"Successfully updated {server_name} counter to {new_value}")
-        return True
-    else:
-        app.logger.error(f"Failed to update counter {file_path}: {put_response.status_code} - {put_response.text}")
-        return False
+    return github_api_with_backoff(update_counter_attempt)
 
 def get_token_range_for_server(server_name):
     counter = get_counter(server_name)
@@ -213,6 +286,59 @@ def load_tokens(server_name):
         app.logger.error(f"Error loading tokens for server {server_name}: {e}")
         return None
 
+# === LOCAL TOKEN CACHE to reduce GitHub API calls ===
+class TokenCache:
+    def __init__(self):
+        self.cache = {}
+        self.cache_time = {}
+        self.cache_duration = 300  # 5 minutes cache
+        
+    def get_tokens(self, server_name):
+        current_time = time.time()
+        if (server_name in self.cache and 
+            current_time - self.cache_time.get(server_name, 0) < self.cache_duration):
+            return self.cache[server_name]
+        
+        # Fetch from GitHub
+        tokens = load_tokens(server_name)
+        if tokens:
+            self.cache[server_name] = tokens
+            self.cache_time[server_name] = current_time
+        return tokens
+
+# Initialize token cache
+token_cache = TokenCache()
+
+# Update get_token_range_for_server to use cache
+def get_token_range_for_server(server_name):
+    counter = get_counter(server_name)
+    app.logger.info(f"Current counter for {server_name}: {counter}")
+    
+    bucket = counter // 30
+    start = bucket * 100
+    end = start + 100
+    
+    # Use cached tokens
+    tokens_all = token_cache.get_tokens(server_name)
+    if not tokens_all:
+        app.logger.error(f"No tokens found for server {server_name}")
+        return []
+    
+    app.logger.info(f"Token range for {server_name}: start={start}, end={end}, total_tokens={len(tokens_all)}")
+    
+    if start >= len(tokens_all):
+        app.logger.warning(f"Start index {start} exceeds token list length {len(tokens_all)}, resetting counter")
+        update_counter(server_name, 0)
+        return tokens_all[0:100]
+    
+    if end > len(tokens_all):
+        end = len(tokens_all)
+    
+    token_range = tokens_all[start:end]
+    app.logger.info(f"Selected {len(token_range)} tokens for {server_name}")
+    return token_range
+
+# === ALL YOUR ORIGINAL FUNCTIONS (unchanged) ===
 def encrypt_message(plaintext):
     try:
         key_bytes = b'Yg&tc%DEuh6%Zc^8'
@@ -362,7 +488,7 @@ def handle_requests():
             current_counter = get_counter(server_name)
             app.logger.info(f"Current counter for {server_name}: {current_counter}")
             
-            tokens_all = load_tokens(server_name)
+            tokens_all = token_cache.get_tokens(server_name)
             if tokens_all is None:
                 raise Exception("Failed to load tokens.")
             
@@ -444,5 +570,5 @@ def home():
     return jsonify({"message": "Like Bot API is running!", "status": "active"})
 
 if __name__ == '__main__':
-    # Run the Flask app on port 5001
+    app.logger.info("🚀 Server started with RATE LIMITING and TOKEN ROTATION!")
     app.run(debug=True, host='0.0.0.0', port=5001)
