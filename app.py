@@ -20,8 +20,8 @@ MAIN_REPO_OWNER = "PWRSHAHEEDKALA"
 MAIN_REPO_NAME = "Like_bott"
 
 # NEW: Separate repo for counters (create this repo)
-COUNTER_REPO_OWNER = "PWRSHAHEEDKALA"  # Same owner, different repo
-COUNTER_REPO_NAME = "Telegram-likebot"  # Create this new repo
+COUNTER_REPO_OWNER = "PWRSHAHEEDKALA"
+COUNTER_REPO_NAME = "Telegram-likebot"  # Make sure this repo exists
 
 # Function to download a file from GitHub if it does not exist locally
 def download_file_if_missing(filename, github_path):
@@ -63,8 +63,8 @@ def fetch_file_from_main_repo(file_path):
         app.logger.error(f"Error fetching file from main repo ({file_path}): {response.status_code} - {response.text}")
         return None
 
-# === COUNTER REPO FUNCTIONS ===
-def fetch_counter_from_github(server_name):
+# === COUNTER REPO FUNCTIONS - FIXED ===
+def get_counter(server_name):
     file_map = {
         "IND": "ind_remain.json", 
         "BR": "br_remain.json", 
@@ -83,13 +83,25 @@ def fetch_counter_from_github(server_name):
     response = requests.get(url, headers=headers)
     
     if response.status_code == 200:
-        return response.text
-    else:
-        # If file doesn't exist, create it with default value 0
+        try:
+            content = response.text
+            data = json.loads(content)
+            counter_value = int(data.get("counter", 0))
+            app.logger.info(f"Successfully fetched counter for {server_name}: {counter_value}")
+            return counter_value
+        except Exception as e:
+            app.logger.error(f"Error parsing counter for {server_name}: {e}")
+            return 0
+    elif response.status_code == 404:
+        # File doesn't exist, create it
         app.logger.info(f"Counter file {file_path} not found, creating new one with default value 0")
-        return json.dumps({"counter": 0})
+        update_counter(server_name, 0)  # Create file with 0
+        return 0
+    else:
+        app.logger.error(f"Error fetching counter for {server_name}: {response.status_code} - {response.text}")
+        return 0
 
-def update_counter_on_github(server_name, new_value):
+def update_counter(server_name, new_value):
     file_map = {
         "IND": "ind_remain.json", 
         "BR": "br_remain.json", 
@@ -112,8 +124,13 @@ def update_counter_on_github(server_name, new_value):
     if get_response.status_code == 200:
         file_info = get_response.json()
         sha = file_info["sha"]
+        app.logger.info(f"Found existing file with SHA: {sha}")
     
-    new_content_b64 = base64.b64encode(json.dumps({"counter": new_value}).encode()).decode()
+    # Prepare the content
+    content_data = {"counter": new_value}
+    content_json = json.dumps(content_data, indent=2)
+    new_content_b64 = base64.b64encode(content_json.encode()).decode()
+    
     data = {
         "message": f"Update {server_name} counter to {new_value}",
         "content": new_content_b64
@@ -122,13 +139,43 @@ def update_counter_on_github(server_name, new_value):
     if sha:
         data["sha"] = sha
     
+    app.logger.info(f"Updating counter for {server_name} to {new_value}")
     put_response = requests.put(url, headers=headers, json=data)
+    
     if put_response.status_code in [200, 201]:
         app.logger.info(f"Successfully updated {server_name} counter to {new_value}")
         return True
     else:
         app.logger.error(f"Failed to update counter {file_path}: {put_response.status_code} - {put_response.text}")
         return False
+
+def get_token_range_for_server(server_name):
+    counter = get_counter(server_name)
+    app.logger.info(f"Current counter for {server_name}: {counter}")
+    
+    bucket = counter // 30  # Each bucket covers 30 uses
+    start = bucket * 100
+    end = start + 100
+    
+    tokens_all = load_tokens(server_name)
+    if not tokens_all:
+        app.logger.error(f"No tokens found for server {server_name}")
+        return []
+    
+    app.logger.info(f"Token range for {server_name}: start={start}, end={end}, total_tokens={len(tokens_all)}")
+    
+    # Ensure we don't go out of bounds
+    if start >= len(tokens_all):
+        app.logger.warning(f"Start index {start} exceeds token list length {len(tokens_all)}, resetting counter")
+        update_counter(server_name, 0)
+        return tokens_all[0:100]  # Return first 100 tokens
+    
+    if end > len(tokens_all):
+        end = len(tokens_all)
+    
+    token_range = tokens_all[start:end]
+    app.logger.info(f"Selected {len(token_range)} tokens for {server_name}")
+    return token_range
 
 # === Token Handling Functions ===
 def load_tokens(server_name):
@@ -143,50 +190,24 @@ def load_tokens(server_name):
             file_path = "token_vn.json"
         else:
             file_path = "token_eu.json"
-        file_content = fetch_file_from_main_repo(file_path)  # Changed to main repo
+            
+        file_content = fetch_file_from_main_repo(file_path)
         if file_content:
             tokens_dict = json.loads(file_content)
             # Convert dictionary values to a list (sorted by key, if needed)
             sorted_keys = sorted(tokens_dict.keys(), key=lambda k: int(k))
-            return [tokens_dict[k] for k in sorted_keys]
+            token_list = [tokens_dict[k] for k in sorted_keys]
+            app.logger.info(f"Loaded {len(token_list)} tokens for {server_name}")
+            return token_list
         else:
-            raise Exception(f"Failed to fetch {file_path} from GitHub.")
+            app.logger.error(f"Failed to fetch {file_path} from GitHub.")
+            return None
     except Exception as e:
         app.logger.error(f"Error loading tokens for server {server_name}: {e}")
         return None
 
-def get_tokens(server_name="GLOBAL", all=False):
-    tokens = load_tokens(server_name)
-    if not tokens:
-        return [] if all else None
-    return tokens if all else random.choice(tokens)
+# ... (rest of your encryption, protobuf, and request functions remain the same) ...
 
-# Counter file functions for tracking token usage ranges
-def get_counter(server_name):
-    content = fetch_counter_from_github(server_name)  # Changed to counter repo
-    if content:
-        try:
-            data = json.loads(content)
-            return int(data.get("counter", 0))
-        except Exception as e:
-            app.logger.error(f"Error parsing counter for {server_name}: {e}")
-            return 0
-    return 0
-
-def update_counter(server_name, new_value):
-    return update_counter_on_github(server_name, new_value)  # Changed to counter repo
-
-def get_token_range_for_server(server_name):
-    counter = get_counter(server_name)
-    bucket = counter // 30  # Each bucket covers 30 uses
-    start = bucket * 100
-    end = start + 100
-    tokens_all = load_tokens(server_name)
-    if not tokens_all:
-        return []
-    return tokens_all[start:end]
-
-# === Encryption and Protobuf Functions (unchanged) ===
 def encrypt_message(plaintext):
     try:
         key_bytes = b'Yg&tc%DEuh6%Zc^8'
@@ -225,7 +246,6 @@ def enc(uid):
         return None
     return encrypt_message(protobuf_data)
 
-# === Asynchronous HTTP Request Functions (unchanged) ===
 async def send_request(encrypted_uid, token, url):
     try:
         edata = bytes.fromhex(encrypted_uid)
@@ -266,9 +286,11 @@ async def send_multiple_requests(uid, server_name, url):
         if tokens is None or len(tokens) == 0:
             app.logger.error("Failed to load tokens from the specified range.")
             return None
-        # Send 100 requests round-robin using the filtered token range
-        for i in range(100):
-            token = tokens[i % len(tokens)]
+        
+        app.logger.info(f"Sending {len(tokens)} requests for {server_name}")
+        # Send requests using the filtered token range
+        for i in range(len(tokens)):
+            token = tokens[i]
             tasks.append(send_request(encrypted_uid, token, url))
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return results
@@ -276,7 +298,6 @@ async def send_multiple_requests(uid, server_name, url):
         app.logger.error(f"Exception in send_multiple_requests: {e}")
         return None
 
-# === API Request Function for Getting Player Info ===
 def make_request(encrypt_val, server_name, token):
     try:
         if server_name == "IND":
@@ -331,10 +352,15 @@ def handle_requests():
     try:
         def process_request():
             app.logger.info(f"Starting request processing for UID: {uid}, Server: {server_name}")
+            
+            # Get current counter BEFORE processing
+            current_counter = get_counter(server_name)
+            app.logger.info(f"Current counter for {server_name}: {current_counter}")
+            
             tokens_all = load_tokens(server_name)
             if tokens_all is None:
                 raise Exception("Failed to load tokens.")
-            app.logger.info(f"Loaded tokens: {tokens_all}")
+            
             token = tokens_all[0]
             encrypted_uid = enc(uid)
             if encrypted_uid is None:
@@ -388,14 +414,18 @@ def handle_requests():
                 "status": status
             }
             app.logger.info(f"Request processed successfully for UID: {uid}. Result: {result}")
+            
             # If likes were given (status 1), update the counter in SEPARATE COUNTER REPO
             if status == 1:
-                current_counter = get_counter(server_name)
                 new_counter = current_counter + 1
+                app.logger.info(f"Updating counter for {server_name} from {current_counter} to {new_counter}")
                 if update_counter(server_name, new_counter):
-                    app.logger.info(f"Updated counter for {server_name} to {new_counter} in counter repo")
+                    app.logger.info(f"Successfully updated counter for {server_name} to {new_counter} in counter repo")
                 else:
                     app.logger.error(f"Failed to update counter for {server_name} in counter repo")
+            else:
+                app.logger.info(f"No likes given, counter remains at {current_counter}")
+                
             return result
 
         result = process_request()
