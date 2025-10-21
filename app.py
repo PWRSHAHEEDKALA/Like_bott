@@ -21,7 +21,7 @@ MAIN_REPO_NAME = "Like_bott"
 
 # NEW: Separate repo for counters (create this repo)
 COUNTER_REPO_OWNER = "PWRSHAHEEDKALA"  # Same owner, different repo
-COUNTER_REPO_NAME = "memory_repo"  # Create this new repo
+COUNTER_REPO_NAME = "Telegram-likebot"  # Create this new repo
 
 # Function to download a file from GitHub if it does not exist locally
 def download_file_if_missing(filename, github_path):
