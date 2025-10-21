@@ -362,6 +362,7 @@ def get_token_range_for_server(server_name):
         counter = get_counter(server_name)
         app.logger.info(f"Current counter for {server_name}: {counter}")
         
+        # Calculate which bucket we're in (each bucket = 30 uses)
         bucket = counter // 30
         start = bucket * 100
         end = start + 100
@@ -374,16 +375,18 @@ def get_token_range_for_server(server_name):
         
         app.logger.info(f"Token range for {server_name}: start={start}, end={end}, total_tokens={len(tokens_all)}")
         
+        # If we've exceeded available tokens, reset counter
         if start >= len(tokens_all):
             app.logger.warning(f"Start index {start} exceeds token list length {len(tokens_all)}, resetting counter")
             update_counter(server_name, 0)
             return tokens_all[0:100]
         
+        # Adjust end if it exceeds available tokens
         if end > len(tokens_all):
             end = len(tokens_all)
         
         token_range = tokens_all[start:end]
-        app.logger.info(f"Selected {len(token_range)} tokens for {server_name}")
+        app.logger.info(f"Selected {len(token_range)} tokens for {server_name} (bucket {bucket})")
         return token_range
     except Exception as e:
         app.logger.error(f"Error getting token range for {server_name}: {e}")
@@ -464,7 +467,8 @@ async def send_multiple_requests(uid, server_name, url):
         if encrypted_uid is None:
             app.logger.error("Encryption failed.")
             return None
-        tasks = []
+        
+        # Get token range based on current counter
         tokens = get_token_range_for_server(server_name)
         if tokens is None or len(tokens) == 0:
             app.logger.error("Failed to load tokens from the specified range.")
@@ -472,6 +476,7 @@ async def send_multiple_requests(uid, server_name, url):
         
         app.logger.info(f"Sending {len(tokens)} requests for {server_name} with throttling")
         
+        tasks = []
         # Send requests using the filtered token range WITH THROTTLING
         for i in range(len(tokens)):
             token = tokens[i]
@@ -480,7 +485,12 @@ async def send_multiple_requests(uid, server_name, url):
             tasks.append(task)
             
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        return results
+        
+        # Count successful requests (status 200)
+        successful_requests = sum(1 for result in results if result == 200)
+        app.logger.info(f"Request completion: {successful_requests}/{len(tokens)} successful")
+        
+        return successful_requests
     except Exception as e:
         app.logger.error(f"Exception in send_multiple_requests: {e}")
         return None
@@ -528,7 +538,7 @@ def decode_protobuf(binary):
         app.logger.error(f"Unexpected error during protobuf decoding: {e}")
         return None
 
-# === Main /like Endpoint (ORIGINAL RESPONSE FORMAT) ===
+# === Main /like Endpoint (FIXED COUNTER LOGIC) ===
 @app.route('/like', methods=['GET'])
 def handle_requests():
     uid = request.args.get("uid")
@@ -577,7 +587,7 @@ def handle_requests():
                 url = "https://clientbp.ggblueshark.com/LikeProfile"
 
             # Perform like requests asynchronously using tokens from a specified bucket/range
-            asyncio.run(send_multiple_requests(uid, server_name, url))
+            successful_requests = asyncio.run(send_multiple_requests(uid, server_name, url))
 
             after = make_request(encrypted_uid, server_name, token)
             if after is None:
@@ -592,6 +602,7 @@ def handle_requests():
             player_name = str(data_after.get('AccountInfo', {}).get('PlayerNickname', ''))
             like_given = after_like - before_like
             status = 1 if like_given != 0 else 2
+            
             result = {
                 "LikesGivenByAPI": like_given,
                 "LikesbeforeCommand": before_like,
@@ -602,16 +613,16 @@ def handle_requests():
             }
             app.logger.info(f"Request processed successfully for UID: {uid}. Result: {result}")
             
-            # If likes were given (status 1), update the counter in SEPARATE COUNTER REPO
-            if status == 1:
-                new_counter = current_counter + 1
-                app.logger.info(f"Updating counter for {server_name} from {current_counter} to {new_counter}")
+            # FIXED: Update counter based on successful requests, not just status
+            if successful_requests and successful_requests > 0:
+                new_counter = current_counter + successful_requests
+                app.logger.info(f"Updating counter for {server_name} from {current_counter} to {new_counter} ({successful_requests} successful requests)")
                 if update_counter(server_name, new_counter):
                     app.logger.info(f"Successfully updated counter for {server_name} to {new_counter} in counter repo")
                 else:
                     app.logger.error(f"Failed to update counter for {server_name} in counter repo")
             else:
-                app.logger.info(f"No likes given, counter remains at {current_counter}")
+                app.logger.info(f"No successful requests, counter remains at {current_counter}")
                 
             return result
 
@@ -626,5 +637,5 @@ def home():
     return jsonify({"message": "Like Bot API is running!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with REQUEST THROTTLING (original response format preserved)!")
+    app.logger.info("🚀 Server started with FIXED COUNTER SYSTEM and REQUEST THROTTLING!")
     app.run(debug=True, host='0.0.0.0', port=5001)
