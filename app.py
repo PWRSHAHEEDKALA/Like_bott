@@ -14,10 +14,14 @@ import random
 
 app = Flask(__name__)
 
-# === GitHub configuration for private repo access ===
+# === GitHub configuration ===
 GITHUB_TOKEN = "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"
-REPO_OWNER = "PWRSHAHEEDKALA"
-REPO_NAME = "Like_bott"
+MAIN_REPO_OWNER = "PWRSHAHEEDKALA"
+MAIN_REPO_NAME = "Like_bott"
+
+# NEW: Separate repo for counters (create this repo)
+COUNTER_REPO_OWNER = "PWRSHAHEEDKALA"  # Same owner, different repo
+COUNTER_REPO_NAME = "memory_repo"  # Create this new repo
 
 # Function to download a file from GitHub if it does not exist locally
 def download_file_if_missing(filename, github_path):
@@ -26,7 +30,7 @@ def download_file_if_missing(filename, github_path):
             "Authorization": f"Bearer {GITHUB_TOKEN}",
             "Accept": "application/vnd.github.v3.raw",
         }
-        url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{github_path}"
+        url = f"https://api.github.com/repos/{MAIN_REPO_OWNER}/{MAIN_REPO_NAME}/contents/{github_path}"
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             with open(filename, "w") as f:
@@ -45,43 +49,85 @@ import like_pb2
 import like_count_pb2
 import uid_generator_pb2
 
-# === GitHub File Fetching (for token files, counter files, etc.) ===
-def fetch_file_from_github(file_path):
+# === GitHub File Fetching (for token files from MAIN repo) ===
+def fetch_file_from_main_repo(file_path):
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3.raw",
     }
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{file_path}"
+    url = f"https://api.github.com/repos/{MAIN_REPO_OWNER}/{MAIN_REPO_NAME}/contents/{file_path}"
     response = requests.get(url, headers=headers)
     if response.status_code == 200:
         return response.text
     else:
-        app.logger.error(f"Error fetching file from GitHub ({file_path}): {response.status_code} - {response.text}")
+        app.logger.error(f"Error fetching file from main repo ({file_path}): {response.status_code} - {response.text}")
         return None
 
-def update_file_on_github(file_path, new_content):
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{file_path}"
+# === COUNTER REPO FUNCTIONS ===
+def fetch_counter_from_github(server_name):
+    file_map = {
+        "IND": "ind_remain.json", 
+        "BR": "br_remain.json", 
+        "SG": "sg_remain.json",
+        "BD": "bd_remain.json",
+        "ME": "me_remain.json",
+        "NA": "na_remain.json"
+    }
+    file_path = file_map.get(server_name, "bd_remain.json")
+    
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3.raw",
+    }
+    url = f"https://api.github.com/repos/{COUNTER_REPO_OWNER}/{COUNTER_REPO_NAME}/contents/{file_path}"
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code == 200:
+        return response.text
+    else:
+        # If file doesn't exist, create it with default value 0
+        app.logger.info(f"Counter file {file_path} not found, creating new one with default value 0")
+        return json.dumps({"counter": 0})
+
+def update_counter_on_github(server_name, new_value):
+    file_map = {
+        "IND": "ind_remain.json", 
+        "BR": "br_remain.json", 
+        "SG": "sg_remain.json",
+        "BD": "bd_remain.json", 
+        "ME": "me_remain.json",
+        "NA": "na_remain.json"
+    }
+    file_path = file_map.get(server_name, "bd_remain.json")
+    
+    url = f"https://api.github.com/repos/{COUNTER_REPO_OWNER}/{COUNTER_REPO_NAME}/contents/{file_path}"
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
     }
+    
+    # First, try to get the file to get its SHA (if it exists)
     get_response = requests.get(url, headers=headers)
-    if get_response.status_code != 200:
-        app.logger.error(f"Failed to get file {file_path} for update: {get_response.status_code} - {get_response.text}")
-        return False
-    file_info = get_response.json()
-    sha = file_info["sha"]
-    new_content_b64 = base64.b64encode(new_content.encode()).decode()
+    sha = None
+    if get_response.status_code == 200:
+        file_info = get_response.json()
+        sha = file_info["sha"]
+    
+    new_content_b64 = base64.b64encode(json.dumps({"counter": new_value}).encode()).decode()
     data = {
-        "message": "Update counter",
-        "content": new_content_b64,
-        "sha": sha
+        "message": f"Update {server_name} counter to {new_value}",
+        "content": new_content_b64
     }
+    
+    if sha:
+        data["sha"] = sha
+    
     put_response = requests.put(url, headers=headers, json=data)
     if put_response.status_code in [200, 201]:
+        app.logger.info(f"Successfully updated {server_name} counter to {new_value}")
         return True
     else:
-        app.logger.error(f"Failed to update file {file_path}: {put_response.status_code} - {put_response.text}")
+        app.logger.error(f"Failed to update counter {file_path}: {put_response.status_code} - {put_response.text}")
         return False
 
 # === Token Handling Functions ===
@@ -97,7 +143,7 @@ def load_tokens(server_name):
             file_path = "token_vn.json"
         else:
             file_path = "token_eu.json"
-        file_content = fetch_file_from_github(file_path)
+        file_content = fetch_file_from_main_repo(file_path)  # Changed to main repo
         if file_content:
             tokens_dict = json.loads(file_content)
             # Convert dictionary values to a list (sorted by key, if needed)
@@ -117,25 +163,18 @@ def get_tokens(server_name="GLOBAL", all=False):
 
 # Counter file functions for tracking token usage ranges
 def get_counter(server_name):
-    file_map = {"IND": "ind_remain.json", "BR": "br_remain.json", "SG": "bd_remain.json", 
-                "SAC": "br_remain.json", "NA": "br_remain.json", "ME": "me_remain.json"}
-    file_path = file_map.get(server_name, "bd_remain.json")
-    content = fetch_file_from_github(file_path)
+    content = fetch_counter_from_github(server_name)  # Changed to counter repo
     if content:
         try:
             data = json.loads(content)
             return int(data.get("counter", 0))
         except Exception as e:
-            app.logger.error(f"Error parsing counter from {file_path}: {e}")
+            app.logger.error(f"Error parsing counter for {server_name}: {e}")
             return 0
     return 0
 
 def update_counter(server_name, new_value):
-    file_map = {"IND": "ind_remain.json", "BR": "br_remain.json", "SG": "bd_remain.json", 
-                "SAC": "br_remain.json", "NA": "br_remain.json", "ME": "me_remain.json"}
-    file_path = file_map.get(server_name, "bd_remain.json")
-    new_data = json.dumps({"counter": new_value})
-    return update_file_on_github(file_path, new_data)
+    return update_counter_on_github(server_name, new_value)  # Changed to counter repo
 
 def get_token_range_for_server(server_name):
     counter = get_counter(server_name)
@@ -147,7 +186,7 @@ def get_token_range_for_server(server_name):
         return []
     return tokens_all[start:end]
 
-# === Encryption and Protobuf Functions ===
+# === Encryption and Protobuf Functions (unchanged) ===
 def encrypt_message(plaintext):
     try:
         key_bytes = b'Yg&tc%DEuh6%Zc^8'
@@ -186,7 +225,7 @@ def enc(uid):
         return None
     return encrypt_message(protobuf_data)
 
-# === Asynchronous HTTP Request Functions ===
+# === Asynchronous HTTP Request Functions (unchanged) ===
 async def send_request(encrypted_uid, token, url):
     try:
         edata = bytes.fromhex(encrypted_uid)
@@ -199,7 +238,7 @@ async def send_request(encrypted_uid, token, url):
             'Expect': "100-continue",
             'X-Unity-Version': "2021.3.18f1",
             'X-GA': "v1 1",
-            'ReleaseVersion': "OB50"  # Updated to OB50
+            'ReleaseVersion': "OB50"
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=edata, headers=headers) as response:
@@ -256,7 +295,7 @@ def make_request(encrypt_val, server_name, token):
             'Expect': "100-continue",
             'X-Unity-Version': "2021.3.18f1",
             'X-GA': "v1 1",
-            'ReleaseVersion': "OB50"  # Updated to OB50
+            'ReleaseVersion': "OB50"
         }
         response = requests.post(url, data=edata, headers=headers, verify=False)
         hex_data = response.content.hex()
@@ -280,21 +319,6 @@ def decode_protobuf(binary):
     except Exception as e:
         app.logger.error(f"Unexpected error during protobuf decoding: {e}")
         return None
-
-# === GitHub File Fetching Endpoint (for debugging) ===
-@app.route('/get_file', methods=['GET'])
-def get_github_file():
-    try:
-        file_path = request.args.get("file_path")
-        if not file_path:
-            return jsonify({"error": "File path is required"}), 400
-        content = fetch_file_from_github(file_path)
-        if content is None:
-            return jsonify({"error": "Failed to fetch file from GitHub"}), 500
-        return jsonify({"file_content": content}), 200
-    except Exception as e:
-        app.logger.error(f"Error fetching file from GitHub: {e}")
-        return jsonify({"error": str(e)}), 500
 
 # === Main /like Endpoint ===
 @app.route('/like', methods=['GET'])
@@ -364,14 +388,14 @@ def handle_requests():
                 "status": status
             }
             app.logger.info(f"Request processed successfully for UID: {uid}. Result: {result}")
-            # If likes were given (status 1), update the counter in GitHub
+            # If likes were given (status 1), update the counter in SEPARATE COUNTER REPO
             if status == 1:
                 current_counter = get_counter(server_name)
                 new_counter = current_counter + 1
                 if update_counter(server_name, new_counter):
-                    app.logger.info(f"Updated counter for {server_name} to {new_counter}")
+                    app.logger.info(f"Updated counter for {server_name} to {new_counter} in counter repo")
                 else:
-                    app.logger.error(f"Failed to update counter for {server_name}")
+                    app.logger.error(f"Failed to update counter for {server_name} in counter repo")
             return result
 
         result = process_request()
