@@ -27,6 +27,172 @@ import threading
 
 app = Flask(__name__)
 
+# === JSONBIN COUNTER SYSTEM ===
+class JSONBinManager:
+    def __init__(self):
+        self.api_key = "$2a$10$0kbiUob1JFhNgyTFoWence/ntnK3VDbg2FCEBAxTXDnWuMfjk3HNW"
+        self.bin_id = "67a6a9a9acd3cb34a96c3c0c"  # This will be created automatically
+        self.base_url = "https://api.jsonbin.io/v3/b"
+        
+    def create_bin(self):
+        """Create a new bin with initial counters"""
+        initial_data = {
+            "counters": {
+                "IND": 0, "BR": 0, "SG": 0, 
+                "BD": 0, "ME": 0, "NA": 0
+            }
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "X-Master-Key": self.api_key,
+            "X-Bin-Name": "LikeBot Counters"
+        }
+        
+        try:
+            response = requests.post(self.base_url, json=initial_data, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                self.bin_id = data['metadata']['id']
+                app.logger.info(f"✅ Created JSONBin with ID: {self.bin_id}")
+                return True
+            else:
+                app.logger.error(f"❌ Failed to create JSONBin: {response.status_code} - {response.text}")
+        except Exception as e:
+            app.logger.error(f"❌ Error creating JSONBin: {e}")
+        return False
+    
+    def get_counter(self, server_name):
+        """Get counter from JSONBin"""
+        try:
+            headers = {"X-Master-Key": self.api_key}
+            url = f"{self.base_url}/{self.bin_id}/latest"
+            
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                counter = data['record']['counters'].get(server_name, 0)
+                app.logger.info(f"Loaded counter for {server_name}: {counter}")
+                return counter
+            elif response.status_code == 404:
+                # Bin doesn't exist, create it
+                app.logger.info("JSONBin not found, creating new one...")
+                if self.create_bin():
+                    return 0
+        except Exception as e:
+            app.logger.error(f"Error reading counter for {server_name}: {e}")
+        
+        return 0
+    
+    def update_counter(self, server_name, new_value):
+        """Update counter in JSONBin"""
+        try:
+            # First get current data
+            headers = {"X-Master-Key": self.api_key}
+            url = f"{self.base_url}/{self.bin_id}/latest"
+            
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                current_data = data['record']
+            else:
+                # Create new bin if doesn't exist
+                if not self.create_bin():
+                    return False
+                current_data = {"counters": {"IND": 0, "BR": 0, "SG": 0, "BD": 0, "ME": 0, "NA": 0}}
+            
+            # Update the specific counter
+            current_data['counters'][server_name] = new_value
+            
+            # Update the bin
+            update_headers = {
+                "Content-Type": "application/json",
+                "X-Master-Key": self.api_key
+            }
+            
+            update_url = f"{self.base_url}/{self.bin_id}"
+            update_response = requests.put(update_url, json=current_data, headers=update_headers)
+            
+            if update_response.status_code == 200:
+                app.logger.info(f"Updated counter for {server_name} to {new_value} in JSONBin")
+                return True
+            else:
+                app.logger.error(f"Failed to update JSONBin: {update_response.status_code}")
+                
+        except Exception as e:
+            app.logger.error(f"Error updating counter for {server_name}: {e}")
+        
+        return False
+    
+    def reset_all_counters(self):
+        """Reset all counters to 0"""
+        try:
+            reset_data = {
+                "counters": {
+                    "IND": 0, "BR": 0, "SG": 0, 
+                    "BD": 0, "ME": 0, "NA": 0
+                }
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "X-Master-Key": self.api_key
+            }
+            
+            url = f"{self.base_url}/{self.bin_id}"
+            response = requests.put(url, json=reset_data, headers=headers)
+            
+            if response.status_code == 200:
+                app.logger.info("Reset all counters to 0 in JSONBin")
+                return True
+                
+        except Exception as e:
+            app.logger.error(f"Error resetting counters: {e}")
+        
+        return False
+
+# Initialize JSONBin
+jsonbin_db = JSONBinManager()
+
+# === DAILY RESET SCHEDULER ===
+def reset_scheduler():
+    """Reset counters daily at 4:30 AM India time"""
+    india_tz = pytz.timezone('Asia/Kolkata')
+    
+    while True:
+        try:
+            now = datetime.now(india_tz)
+            
+            # Set target time to 4:30 AM
+            target_time = now.replace(hour=4, minute=30, second=0, microsecond=0)
+            
+            # If it's already past 4:30 AM, schedule for next day
+            if now > target_time:
+                target_time += timedelta(days=1)
+            
+            # Calculate sleep time
+            sleep_seconds = (target_time - now).total_seconds()
+            
+            app.logger.info(f"Next counter reset scheduled at: {target_time} (in {sleep_seconds/3600:.2f} hours)")
+            
+            # Sleep until 4:30 AM
+            time.sleep(sleep_seconds)
+            
+            # Reset all counters
+            app.logger.info("🕧 4:30 AM - Resetting all counters to 0")
+            jsonbin_db.reset_all_counters()
+            
+            # Sleep for a minute to avoid multiple resets
+            time.sleep(60)
+            
+        except Exception as e:
+            app.logger.error(f"Error in reset scheduler: {e}")
+            time.sleep(300)  # Wait 5 minutes before retrying
+
+# Start the reset scheduler in a background thread
+reset_thread = threading.Thread(target=reset_scheduler, daemon=True)
+reset_thread.start()
+
 # === DOWNLOAD PROTOBUF FILES FROM GITHUB ===
 def download_protobuf_files():
     """Download protobuf files from GitHub if they don't exist"""
@@ -61,108 +227,6 @@ try:
     app.logger.info("✅ All protobuf files imported successfully!")
 except ImportError as e:
     app.logger.error(f"❌ Failed to import protobuf files: {e}")
-
-# === SIMPLE COUNTER SYSTEM (Local files) ===
-def get_counter(server_name):
-    """Get counter from local file"""
-    file_map = {
-        "IND": "ind_remain.json", 
-        "BR": "br_remain.json", 
-        "SG": "sg_remain.json",
-        "BD": "bd_remain.json",
-        "ME": "me_remain.json",
-        "NA": "na_remain.json"
-    }
-    file_path = file_map.get(server_name, "bd_remain.json")
-    
-    try:
-        if os.path.exists(file_path):
-            with open(file_path, 'r') as f:
-                data = json.load(f)
-                counter_value = int(data.get("counter", 0))
-                app.logger.info(f"Loaded counter for {server_name}: {counter_value}")
-                return counter_value
-        else:
-            # Create file with default value
-            with open(file_path, 'w') as f:
-                json.dump({"counter": 0}, f)
-            app.logger.info(f"Created new counter file for {server_name}")
-            return 0
-    except Exception as e:
-        app.logger.error(f"Error reading counter for {server_name}: {e}")
-        return 0
-
-def update_counter(server_name, new_value):
-    """Update counter in local file"""
-    file_map = {
-        "IND": "ind_remain.json", 
-        "BR": "br_remain.json", 
-        "SG": "sg_remain.json",
-        "BD": "bd_remain.json", 
-        "ME": "me_remain.json",
-        "NA": "na_remain.json"
-    }
-    file_path = file_map.get(server_name, "bd_remain.json")
-    
-    try:
-        with open(file_path, 'w') as f:
-            json.dump({"counter": new_value}, f, indent=2)
-        app.logger.info(f"Updated counter for {server_name} to {new_value}")
-        return True
-    except Exception as e:
-        app.logger.error(f"Error updating counter for {server_name}: {e}")
-        return False
-
-def reset_all_counters():
-    """Reset all counters to 0"""
-    try:
-        servers = ["IND", "BR", "SG", "BD", "ME", "NA"]
-        for server in servers:
-            update_counter(server, 0)
-        app.logger.info("Reset all counters to 0")
-        return True
-    except Exception as e:
-        app.logger.error(f"Error resetting counters: {e}")
-        return False
-
-# === DAILY RESET SCHEDULER ===
-def reset_scheduler():
-    """Reset counters daily at 4:30 AM India time"""
-    india_tz = pytz.timezone('Asia/Kolkata')
-    
-    while True:
-        try:
-            now = datetime.now(india_tz)
-            
-            # Set target time to 4:30 AM
-            target_time = now.replace(hour=4, minute=30, second=0, microsecond=0)
-            
-            # If it's already past 4:30 AM, schedule for next day
-            if now > target_time:
-                target_time += timedelta(days=1)
-            
-            # Calculate sleep time
-            sleep_seconds = (target_time - now).total_seconds()
-            
-            app.logger.info(f"Next counter reset scheduled at: {target_time} (in {sleep_seconds/3600:.2f} hours)")
-            
-            # Sleep until 4:30 AM
-            time.sleep(sleep_seconds)
-            
-            # Reset all counters
-            app.logger.info("🕧 4:30 AM - Resetting all counters to 0")
-            reset_all_counters()
-            
-            # Sleep for a minute to avoid multiple resets
-            time.sleep(60)
-            
-        except Exception as e:
-            app.logger.error(f"Error in reset scheduler: {e}")
-            time.sleep(300)  # Wait 5 minutes before retrying
-
-# Start the reset scheduler in a background thread
-reset_thread = threading.Thread(target=reset_scheduler, daemon=True)
-reset_thread.start()
 
 # === LOCAL TOKEN FILES ===
 TOKEN_FILES = {
@@ -214,6 +278,15 @@ class TokenCache:
 # Initialize token cache
 token_cache = TokenCache()
 
+# === JSONBIN COUNTER SYSTEM ===
+def get_counter(server_name):
+    """Get counter from JSONBin"""
+    return jsonbin_db.get_counter(server_name)
+
+def update_counter(server_name, new_value):
+    """Update counter in JSONBin"""
+    return jsonbin_db.update_counter(server_name, new_value)
+
 # === LOCAL TOKEN LOADING ===
 def load_tokens_from_file(server_name):
     """Load tokens directly from local JSON files"""
@@ -239,7 +312,7 @@ def load_tokens_from_file(server_name):
         return None
 
 def get_token_range_for_server(server_name):
-    """Get token range based on counter - USING LOCAL FILES"""
+    """Get token range based on counter - USING JSONBIN"""
     try:
         counter = get_counter(server_name)
         app.logger.info(f"Current counter for {server_name}: {counter}")
@@ -349,7 +422,7 @@ async def send_multiple_requests(uid, server_name, url):
             app.logger.error("Encryption failed.")
             return None
         
-        # Get token range based on current counter - LOCAL FILES
+        # Get token range based on current counter - JSONBIN
         tokens = get_token_range_for_server(server_name)
         if tokens is None or len(tokens) == 0:
             app.logger.error("Failed to load tokens from the specified range.")
@@ -430,7 +503,7 @@ def handle_requests():
         def process_request():
             app.logger.info(f"Starting request processing for UID: {uid}, Server: {server_name}")
             
-            # Get current counter BEFORE processing - LOCAL FILE
+            # Get current counter BEFORE processing - JSONBIN
             current_counter = get_counter(server_name)
             app.logger.info(f"Current counter for {server_name}: {current_counter}")
             
@@ -493,14 +566,14 @@ def handle_requests():
             }
             app.logger.info(f"Request processed successfully for UID: {uid}. Result: {result}")
             
-            # Update counter based on successful requests - LOCAL FILE
+            # Update counter based on successful requests - JSONBIN
             if successful_requests and successful_requests > 0:
                 new_counter = current_counter + successful_requests
                 app.logger.info(f"Updating counter for {server_name} from {current_counter} to {new_counter} ({successful_requests} successful requests)")
                 if update_counter(server_name, new_counter):
-                    app.logger.info(f"Successfully updated counter for {server_name} to {new_counter}")
+                    app.logger.info(f"Successfully updated counter for {server_name} to {new_counter} in JSONBin")
                 else:
-                    app.logger.error(f"Failed to update counter for {server_name}")
+                    app.logger.error(f"Failed to update counter for {server_name} in JSONBin")
             else:
                 app.logger.info(f"No successful requests, counter remains at {current_counter}")
                 
@@ -517,7 +590,7 @@ def handle_requests():
 def reset_counters():
     """Manual endpoint to reset all counters"""
     try:
-        if reset_all_counters():
+        if jsonbin_db.reset_all_counters():
             return jsonify({"message": "All counters reset successfully!"})
         else:
             return jsonify({"error": "Failed to reset counters"}), 500
@@ -526,8 +599,8 @@ def reset_counters():
 
 @app.route('/')
 def home():
-    return jsonify({"message": "Like Bot API is running with LOCAL FILES & Auto Reset!", "status": "active"})
+    return jsonify({"message": "Like Bot API is running with JSONBIN & Auto Reset!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with LOCAL FILES & Daily 4:30 AM Reset!")
+    app.logger.info("🚀 Server started with JSONBIN & Daily 4:30 AM Reset!")
     app.run(debug=True, host='0.0.0.0', port=5001)
