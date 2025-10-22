@@ -3,8 +3,6 @@ import urllib3
 import warnings
 import time
 from functools import wraps
-from datetime import datetime, timedelta
-import pytz
 
 # Suppress all warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -23,7 +21,6 @@ from Crypto.Util.Padding import pad
 from google.protobuf.json_format import MessageToJson
 from google.protobuf.message import DecodeError
 import random
-import threading
 
 app = Flask(__name__)
 
@@ -31,7 +28,7 @@ app = Flask(__name__)
 class JSONBinManager:
     def __init__(self):
         self.api_key = "$2a$10$0kbiUob1JFhNgyTFoWence/ntnK3VDbg2FCEBAxTXDnWuMfjk3HNW"
-        self.bin_id = "68f85679ae596e708f231819"  # Your existing bin ID
+        self.bin_id = "68f85679ae596e708f231819"
         self.base_url = "https://api.jsonbin.io/v3/b"
         
     def get_counter(self, server_name):
@@ -144,18 +141,17 @@ TOKEN_FILES = {
 
 # === Request Throttler for FreeFire API ===
 class RequestThrottler:
-    def __init__(self, max_concurrent=100, delay_between_requests=0.05):  # CHANGED: 100 concurrent, faster
+    def __init__(self, max_concurrent=100, delay_between_requests=0.05):
         self.max_concurrent = max_concurrent
         self.delay_between_requests = delay_between_requests
         self.semaphore = asyncio.Semaphore(max_concurrent)
     
     async def throttle_request(self, coro):
         async with self.semaphore:
-            # Small delay between requests to avoid overwhelming
             await asyncio.sleep(self.delay_between_requests)
             return await coro
 
-# Initialize request throttler - CHANGED: 100 concurrent requests
+# Initialize request throttler
 request_throttler = RequestThrottler(max_concurrent=100, delay_between_requests=0.05)
 
 # === LOCAL TOKEN CACHE ===
@@ -470,16 +466,16 @@ def handle_requests():
             }
             app.logger.info(f"✅ Request processed successfully for UID: {uid}. Result: {result}")
             
-            # Update counter based on successful requests - JSONBIN
-            if successful_requests and successful_requests > 0:
-                new_counter = current_counter + successful_requests
-                app.logger.info(f"🔄 Updating counter for {server_name} from {current_counter} to {new_counter} ({successful_requests} successful requests)")
+            # ✅ CRITICAL FIX: Only update counter by 1 when likes are given (status 1)
+            if status == 1:
+                new_counter = current_counter + 1  # Only increment by 1
+                app.logger.info(f"🔄 Updating counter for {server_name} from {current_counter} to {new_counter} (likes given: status 1)")
                 if update_counter(server_name, new_counter):
                     app.logger.info(f"✅ Successfully updated counter for {server_name} to {new_counter} in JSONBin")
                 else:
                     app.logger.error(f"❌ Failed to update counter for {server_name} in JSONBin")
             else:
-                app.logger.info(f"ℹ️ No successful requests, counter remains at {current_counter}")
+                app.logger.info(f"ℹ️ No likes given (status {status}), counter remains at {current_counter}")
                 
             return result
 
@@ -511,8 +507,7 @@ def get_all_counters():
                 "message": "Current counters from JSONBin",
                 "counters": counters,
                 "total_requests": total_requests,
-                "bin_id": "68f85679ae596e708f231819",
-                "last_updated": datetime.now().isoformat()
+                "bin_id": "68f85679ae596e708f231819"
             })
         else:
             return jsonify({"error": f"Failed to fetch counters: {response.status_code}"}), 500
@@ -525,5 +520,5 @@ def home():
     return jsonify({"message": "Like Bot API is running with JSONBIN!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with JSONBIN - 100 TOKENS & Counter System!")
+    app.logger.info("🚀 Server started with JSONBIN - CORRECT COUNTER LOGIC!")
     app.run(debug=True, host='0.0.0.0', port=5001)
