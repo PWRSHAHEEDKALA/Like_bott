@@ -27,6 +27,41 @@ import threading
 
 app = Flask(__name__)
 
+# === DOWNLOAD PROTOBUF FILES FROM GITHUB ===
+def download_protobuf_files():
+    """Download protobuf files from GitHub if they don't exist"""
+    protobuf_files = {
+        "like_pb2.py": "PWRSHAHEEDKALA/Like_bott/main/like_pb2.py",
+        "like_count_pb2.py": "PWRSHAHEEDKALA/Like_bott/main/like_count_pb2.py", 
+        "uid_generator_pb2.py": "PWRSHAHEEDKALA/Like_bott/main/uid_generator_pb2.py"
+    }
+    
+    for filename, github_path in protobuf_files.items():
+        if not os.path.exists(filename):
+            try:
+                url = f"https://raw.githubusercontent.com/{github_path}"
+                response = requests.get(url)
+                if response.status_code == 200:
+                    with open(filename, 'w') as f:
+                        f.write(response.text)
+                    app.logger.info(f"✅ Downloaded {filename} from GitHub")
+                else:
+                    app.logger.error(f"❌ Failed to download {filename}: {response.status_code}")
+            except Exception as e:
+                app.logger.error(f"❌ Error downloading {filename}: {e}")
+
+# Download protobuf files on startup
+download_protobuf_files()
+
+# Now import the protobuf files
+try:
+    import like_pb2
+    import like_count_pb2  
+    import uid_generator_pb2
+    app.logger.info("✅ All protobuf files imported successfully!")
+except ImportError as e:
+    app.logger.error(f"❌ Failed to import protobuf files: {e}")
+
 # === SIMPLE COUNTER SYSTEM (Local files) ===
 def get_counter(server_name):
     """Get counter from local file"""
