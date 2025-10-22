@@ -85,6 +85,30 @@ class JSONBinManager:
         
         return False
 
+    def reset_all_counters(self):
+        """Reset all counters to 0"""
+        try:
+            reset_data = {"counters": {"IND": 0, "BR": 0, "SG": 0, "BD": 0, "ME": 0, "NA": 0}}
+            
+            update_headers = {
+                "Content-Type": "application/json",
+                "X-Master-Key": self.api_key
+            }
+            
+            update_url = f"{self.base_url}/{self.bin_id}"
+            update_response = requests.put(update_url, json=reset_data, headers=update_headers)
+            
+            if update_response.status_code == 200:
+                app.logger.info("✅ Reset all counters to 0")
+                return True
+            else:
+                app.logger.error(f"❌ Failed to reset counters: {update_response.status_code}")
+                return False
+                
+        except Exception as e:
+            app.logger.error(f"❌ Error resetting counters: {e}")
+            return False
+
 # Initialize JSONBin
 jsonbin_db = JSONBinManager()
 
@@ -185,6 +209,35 @@ def get_counter(server_name):
 def update_counter(server_name, new_value):
     """Update counter in JSONBin"""
     return jsonbin_db.update_counter(server_name, new_value)
+
+def skip_bucket(server_name):
+    """Skip current bucket by advancing counter to next bucket"""
+    try:
+        current_counter = get_counter(server_name)
+        # Calculate next bucket start (current bucket * 30 + 30)
+        bucket = current_counter // 30
+        next_bucket_start = (bucket + 1) * 30
+        
+        app.logger.info(f"🔄 Skipping bucket for {server_name}: {current_counter} -> {next_bucket_start}")
+        return update_counter(server_name, next_bucket_start)
+    except Exception as e:
+        app.logger.error(f"❌ Error skipping bucket for {server_name}: {e}")
+        return False
+
+def reset_counter(server_name=None):
+    """Reset counter(s) to 0"""
+    try:
+        if server_name:
+            # Reset specific region
+            app.logger.info(f"🔄 Resetting counter for {server_name} to 0")
+            return update_counter(server_name, 0)
+        else:
+            # Reset all counters
+            app.logger.info("🔄 Resetting ALL counters to 0")
+            return jsonbin_db.reset_all_counters()
+    except Exception as e:
+        app.logger.error(f"❌ Error resetting counter: {e}")
+        return False
 
 # === LOCAL TOKEN LOADING ===
 def load_tokens_from_file(server_name):
@@ -391,6 +444,11 @@ def decode_protobuf(binary):
         app.logger.error(f"Unexpected error during protobuf decoding: {e}")
         return None
 
+# === FIX FOR STATUS 2 ISSUE ===
+def check_like_success(before_like, after_like):
+    """Check if likes were actually given"""
+    return after_like > before_like
+
 # === Main /like Endpoint ===
 @app.route('/like', methods=['GET'])
 def handle_requests():
@@ -442,19 +500,34 @@ def handle_requests():
             # Perform like requests asynchronously using ALL 100 tokens
             successful_requests = asyncio.run(send_multiple_requests(uid, server_name, url))
 
-            after = make_request(encrypted_uid, server_name, token)
+            # Wait a bit for likes to process
+            time.sleep(2)
+            
+            # Try multiple times to get updated like count
+            after = None
+            for attempt in range(3):
+                after = make_request(encrypted_uid, server_name, token)
+                if after is not None:
+                    break
+                time.sleep(1)
+            
             if after is None:
                 raise Exception("Failed to retrieve player info after like requests.")
+                
             try:
                 jsone_after = MessageToJson(after)
                 data_after = json.loads(jsone_after)
             except Exception as e:
                 raise Exception(f"Error converting 'after' protobuf to JSON: {e}")
+                
             after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
             player_uid = int(data_after.get('AccountInfo', {}).get('UID', 0))
             player_name = str(data_after.get('AccountInfo', {}).get('PlayerNickname', ''))
+            
+            # FIX: Properly check if likes were actually given
             like_given = after_like - before_like
-            status = 1 if like_given != 0 else 2
+            likes_were_given = check_like_success(before_like, after_like)
+            status = 1 if likes_were_given else 2
             
             result = {
                 "LikesGivenByAPI": like_given,
@@ -483,6 +556,67 @@ def handle_requests():
         return jsonify(result)
     except Exception as e:
         app.logger.error(f"❌ Error processing request: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# === Skip Bucket Command ===
+@app.route('/skip', methods=['GET'])
+def skip_bucket_endpoint():
+    """Skip current bucket for a region"""
+    server_name = request.args.get("region", "").upper()
+    if not server_name:
+        return jsonify({"error": "Region parameter is required"}), 400
+    
+    if server_name not in ["IND", "BR", "SG", "BD", "ME", "NA"]:
+        return jsonify({"error": "Invalid region. Use: IND, BR, SG, BD, ME, NA"}), 400
+    
+    try:
+        old_counter = get_counter(server_name)
+        if skip_bucket(server_name):
+            new_counter = get_counter(server_name)
+            return jsonify({
+                "message": f"✅ Successfully skipped bucket for {server_name}",
+                "old_counter": old_counter,
+                "new_counter": new_counter,
+                "bucket_skipped": (old_counter // 30),
+                "new_bucket": (new_counter // 30)
+            })
+        else:
+            return jsonify({"error": f"Failed to skip bucket for {server_name}"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# === Reset Counter Command ===
+@app.route('/reset-counter', methods=['GET'])
+def reset_counter_endpoint():
+    """Reset counter(s) to 0"""
+    server_name = request.args.get("region", "").upper()
+    
+    try:
+        if server_name:
+            # Reset specific region
+            if server_name not in ["IND", "BR", "SG", "BD", "ME", "NA"]:
+                return jsonify({"error": "Invalid region. Use: IND, BR, SG, BD, ME, NA"}), 400
+            
+            old_counter = get_counter(server_name)
+            if reset_counter(server_name):
+                return jsonify({
+                    "message": f"✅ Successfully reset counter for {server_name}",
+                    "region": server_name,
+                    "old_counter": old_counter,
+                    "new_counter": 0
+                })
+            else:
+                return jsonify({"error": f"Failed to reset counter for {server_name}"}), 500
+        else:
+            # Reset all counters
+            if reset_counter():
+                return jsonify({
+                    "message": "✅ Successfully reset ALL counters to 0",
+                    "regions_reset": ["IND", "BR", "SG", "BD", "ME", "NA"]
+                })
+            else:
+                return jsonify({"error": "Failed to reset counters"}), 500
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 # === Check All Counters Endpoint ===
@@ -520,5 +654,5 @@ def home():
     return jsonify({"message": "Like Bot API is running with JSONBIN!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with JSONBIN - CORRECT COUNTER LOGIC!")
+    app.logger.info("🚀 Server started with FIXED STATUS ISSUE & NEW COMMANDS!")
     app.run(debug=True, host='0.0.0.0', port=5001)
