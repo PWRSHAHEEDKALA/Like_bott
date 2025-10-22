@@ -1,7 +1,7 @@
-aiohttp
-Flask
-pycryptodome
-protobuf
-requests
-supabase-py
-pytz
+aiohttp==3.9.1
+Flask==2.3.3
+pycryptodome==3.20.0
+protobuf==4.25.3
+requests==2.31.0
+supabase==2.3.0
+pytz==2024.1
