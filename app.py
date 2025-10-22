@@ -38,17 +38,17 @@ class MongoDBManager:
     
     def connect(self):
         try:
-            # YOUR CONNECTION STRING - Use the password you copied
+            # Your MongoDB connection string
             connection_string = "mongodb+srv://nassemaaqib_db_user:Vid6eOLjws9IMiU6@cluster0.xrd9thx.mongodb.net/Aruu?retryWrites=true&w=majority&appName=Cluster0"
             
-            self.client = MongoClient(connection_string, serverSelectionTimeoutMS=5000)
-            self.db = self.client['Aruu']  # Your database name
+            self.client = MongoClient(connection_string, serverSelectionTimeoutMS=10000)
+            self.db = self.client['Aruu']
             
             # Test connection
             self.client.admin.command('ismaster')
             app.logger.info("✅ MongoDB Atlas connected successfully!")
             
-        except ConnectionFailure as e:
+        except Exception as e:
             app.logger.error(f"❌ MongoDB connection failed: {e}")
             self.client = None
             self.db = None
@@ -64,8 +64,9 @@ class MongoDBManager:
             counter_data = counters_collection.find_one({'server_name': server_name})
             
             if counter_data:
-                app.logger.info(f"Loaded counter for {server_name}: {counter_data['counter']}")
-                return counter_data['counter']
+                counter_value = counter_data.get('counter', 0)
+                app.logger.info(f"Loaded counter for {server_name}: {counter_value}")
+                return counter_value
             else:
                 # Initialize counter if it doesn't exist
                 self.update_counter(server_name, 0)
@@ -104,12 +105,16 @@ class MongoDBManager:
                 
         try:
             counters_collection = self.db['Counters']
-            # Reset all counters to 0
-            result = counters_collection.update_many(
-                {},
-                {'$set': {'counter': 0, 'last_reset': datetime.now()}}
-            )
-            app.logger.info(f"Reset all counters. Modified {result.modified_count} documents")
+            servers = ["IND", "BR", "SG", "BD", "ME", "NA"]
+            
+            for server in servers:
+                counters_collection.update_one(
+                    {'server_name': server},
+                    {'$set': {'counter': 0, 'last_reset': datetime.now()}},
+                    upsert=True
+                )
+            
+            app.logger.info("Reset all counters to 0")
             return True
         except Exception as e:
             app.logger.error(f"Error resetting counters: {e}")
@@ -420,7 +425,7 @@ def decode_protobuf(binary):
         app.logger.error(f"Unexpected error during protobuf decoding: {e}")
         return None
 
-# === Main /like Endpoint (USES MONGODB) ===
+# === Main /like Endpoint ===
 @app.route('/like', methods=['GET'])
 def handle_requests():
     uid = request.args.get("uid")
