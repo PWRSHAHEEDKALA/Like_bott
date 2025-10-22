@@ -165,7 +165,7 @@ TOKEN_FILES = {
 
 # === Request Throttler for FreeFire API ===
 class RequestThrottler:
-    def __init__(self, max_concurrent=100, delay_between_requests=0.05):
+    def __init__(self, max_concurrent=50, delay_between_requests=0.1):
         self.max_concurrent = max_concurrent
         self.delay_between_requests = delay_between_requests
         self.semaphore = asyncio.Semaphore(max_concurrent)
@@ -176,7 +176,7 @@ class RequestThrottler:
             return await coro
 
 # Initialize request throttler
-request_throttler = RequestThrottler(max_concurrent=100, delay_between_requests=0.05)
+request_throttler = RequestThrottler(max_concurrent=50, delay_between_requests=0.1)
 
 # === LOCAL TOKEN CACHE ===
 class TokenCache:
@@ -381,7 +381,7 @@ async def send_multiple_requests(uid, server_name, url):
             app.logger.error("Failed to load tokens from the specified range.")
             return None
         
-        app.logger.info(f"🚀 Sending {len(tokens)} requests for {server_name}")
+        app.logger.info(f"🚀 Sending {len(tokens)} requests for {server_name} using bucket {get_counter(server_name) // 30}")
         
         tasks = []
         # Send ALL requests using ALL tokens (up to 100)
@@ -463,12 +463,15 @@ def handle_requests():
             
             # Get current counter BEFORE processing - JSONBIN
             current_counter = get_counter(server_name)
-            app.logger.info(f"📊 Current counter for {server_name}: {current_counter}")
+            current_bucket = current_counter // 30
+            app.logger.info(f"📊 Current counter for {server_name}: {current_counter} (Bucket: {current_bucket})")
             
-            tokens_all = token_cache.get_tokens(server_name)
-            if tokens_all is None:
-                raise Exception("Failed to load tokens.")
+            # Get tokens for current bucket
+            tokens_all = get_token_range_for_server(server_name)
+            if tokens_all is None or len(tokens_all) == 0:
+                raise Exception("Failed to load tokens for current bucket.")
             
+            # Use first token from current bucket for checking likes
             token = tokens_all[0]
             encrypted_uid = enc(uid)
             if encrypted_uid is None:
@@ -497,11 +500,11 @@ def handle_requests():
             else:
                 url = "https://clientbp.ggblueshark.com/LikeProfile"
 
-            # Perform like requests asynchronously using ALL 100 tokens
+            # Perform like requests asynchronously using ALL tokens from current bucket
             successful_requests = asyncio.run(send_multiple_requests(uid, server_name, url))
 
             # Wait a bit for likes to process
-            time.sleep(2)
+            time.sleep(3)
             
             # Try multiple times to get updated like count
             after = None
@@ -576,9 +579,7 @@ def skip_bucket_endpoint():
             return jsonify({
                 "message": f"✅ Successfully skipped bucket for {server_name}",
                 "old_counter": old_counter,
-                "new_counter": new_counter,
-                "bucket_skipped": (old_counter // 30),
-                "new_bucket": (new_counter // 30)
+                "new_counter": new_counter
             })
         else:
             return jsonify({"error": f"Failed to skip bucket for {server_name}"}), 500
@@ -654,5 +655,5 @@ def home():
     return jsonify({"message": "Like Bot API is running with JSONBIN!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with FIXED STATUS ISSUE & NEW COMMANDS!")
+    app.logger.info("🚀 Server started with PROPER TOKEN ROTATION!")
     app.run(debug=True, host='0.0.0.0', port=5001)
