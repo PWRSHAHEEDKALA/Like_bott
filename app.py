@@ -4,9 +4,8 @@ import warnings
 import time
 from functools import wraps
 import threading
-from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime, time as dt_time
 import pytz
-from datetime import datetime
 
 # Suppress all warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -28,21 +27,53 @@ import random
 
 app = Flask(__name__)
 
-# === AUTO RESET COUNTER SCHEDULER ===
-def reset_all_counters():
-    """Reset all counters to 0 at 4:30 AM India time"""
-    try:
-        app.logger.info("🕒 Scheduled counter reset initiated...")
-        jsonbin_db.reset_all_counters()
-        app.logger.info("✅ All counters reset to 0 successfully!")
-    except Exception as e:
-        app.logger.error(f"❌ Error resetting counters: {e}")
+# === SIMPLE AUTO RESET COUNTER SYSTEM ===
+class AutoResetManager:
+    def __init__(self):
+        self.last_reset_date = None
+        self.check_reset_needed()
+        
+    def check_reset_needed(self):
+        """Check if reset is needed and perform it"""
+        try:
+            india_tz = pytz.timezone('Asia/Kolkata')
+            now = datetime.now(india_tz)
+            current_date = now.date()
+            
+            # Check if it's 4:30 AM or later and we haven't reset today
+            if (now.hour >= 4 and now.minute >= 30) and (self.last_reset_date != current_date):
+                self.reset_all_counters()
+                self.last_reset_date = current_date
+                app.logger.info(f"✅ Auto-reset performed at {now}")
+                
+        except Exception as e:
+            app.logger.error(f"❌ Error in auto-reset check: {e}")
+    
+    def reset_all_counters(self):
+        """Reset all counters to 0"""
+        try:
+            reset_data = {"counters": {"IND": 0, "BR": 0, "SG": 0, "BD": 0, "ME": 0, "NA": 0}}
+            
+            update_headers = {
+                "Content-Type": "application/json",
+                "X-Master-Key": "$2a$10$0kbiUob1JFhNgyTFoWence/ntnK3VDbg2FCEBAxTXDnWuMfjk3HNW"
+            }
+            
+            update_url = "https://api.jsonbin.io/v3/b/68f85679ae596e708f231819"
+            response = requests.put(update_url, json=reset_data, headers=update_headers, timeout=10)
+            
+            if response.status_code == 200:
+                app.logger.info("✅ All counters reset to 0 successfully!")
+                return True
+            else:
+                app.logger.error(f"❌ Failed to reset counters: {response.status_code}")
+                return False
+        except Exception as e:
+            app.logger.error(f"❌ Error resetting all counters: {e}")
+            return False
 
-# Initialize scheduler
-scheduler = BackgroundScheduler()
-india_timezone = pytz.timezone('Asia/Kolkata')
-scheduler.add_job(reset_all_counters, 'cron', hour=4, minute=30, timezone=india_timezone)
-scheduler.start()
+# Initialize auto-reset manager
+auto_reset_manager = AutoResetManager()
 
 # === JSONBIN COUNTER SYSTEM ===
 class JSONBinManager:
@@ -54,6 +85,9 @@ class JSONBinManager:
     def get_counter(self, server_name):
         """Get counter from JSONBin"""
         try:
+            # Check auto-reset first
+            auto_reset_manager.check_reset_needed()
+            
             headers = {"X-Master-Key": self.api_key}
             url = f"{self.base_url}/{self.bin_id}/latest"
             
@@ -70,6 +104,9 @@ class JSONBinManager:
     def update_counter(self, server_name, new_value):
         """Update counter in JSONBin"""
         try:
+            # Check auto-reset first
+            auto_reset_manager.check_reset_needed()
+            
             # First get current data
             headers = {"X-Master-Key": self.api_key}
             url = f"{self.base_url}/{self.bin_id}/latest"
@@ -105,21 +142,7 @@ class JSONBinManager:
 
     def reset_all_counters(self):
         """Reset all counters to 0"""
-        try:
-            reset_data = {"counters": {"IND": 0, "BR": 0, "SG": 0, "BD": 0, "ME": 0, "NA": 0}}
-            
-            update_headers = {
-                "Content-Type": "application/json",
-                "X-Master-Key": self.api_key
-            }
-            
-            update_url = f"{self.base_url}/{self.bin_id}"
-            update_response = requests.put(update_url, json=reset_data, headers=update_headers, timeout=10)
-            
-            return update_response.status_code == 200
-        except Exception as e:
-            app.logger.error(f"❌ Error resetting all counters: {e}")
-            return False
+        return auto_reset_manager.reset_all_counters()
 
 # Initialize JSONBin
 jsonbin_db = JSONBinManager()
@@ -663,5 +686,5 @@ def home():
     return jsonify({"message": "Like Bot API is running!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with ULTRA FAST LIKE SENDING & AUTO RESET!")
+    app.logger.info("🚀 Server started with ULTRA FAST LIKE SENDING & SIMPLE AUTO RESET!")
     app.run(debug=True, host='0.0.0.0', port=5001, threaded=True)
