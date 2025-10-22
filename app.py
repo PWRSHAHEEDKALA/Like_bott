@@ -165,7 +165,7 @@ TOKEN_FILES = {
 
 # === Request Throttler for FreeFire API ===
 class RequestThrottler:
-    def __init__(self, max_concurrent=50, delay_between_requests=0.1):
+    def __init__(self, max_concurrent=100, delay_between_requests=0.05):  # CHANGED: 100 concurrent, faster
         self.max_concurrent = max_concurrent
         self.delay_between_requests = delay_between_requests
         self.semaphore = asyncio.Semaphore(max_concurrent)
@@ -175,8 +175,8 @@ class RequestThrottler:
             await asyncio.sleep(self.delay_between_requests)
             return await coro
 
-# Initialize request throttler
-request_throttler = RequestThrottler(max_concurrent=50, delay_between_requests=0.1)
+# Initialize request throttler - CHANGED: 100 concurrent requests
+request_throttler = RequestThrottler(max_concurrent=100, delay_between_requests=0.05)
 
 # === LOCAL TOKEN CACHE ===
 class TokenCache:
@@ -655,5 +655,5 @@ def home():
     return jsonify({"message": "Like Bot API is running with JSONBIN!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with PROPER TOKEN ROTATION!")
+    app.logger.info("🚀 Server started with 100 REQUESTS & PROPER TOKEN ROTATION!")
     app.run(debug=True, host='0.0.0.0', port=5001)
