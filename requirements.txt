@@ -3,5 +3,5 @@ Flask
 pycryptodome
 protobuf
 requests
-pymongo
+supabase-py
 pytz
