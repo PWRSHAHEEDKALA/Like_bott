@@ -31,37 +31,9 @@ app = Flask(__name__)
 class JSONBinManager:
     def __init__(self):
         self.api_key = "$2a$10$0kbiUob1JFhNgyTFoWence/ntnK3VDbg2FCEBAxTXDnWuMfjk3HNW"
-        self.bin_id = "67a6a9a9acd3cb34a96c3c0c"  # This will be created automatically
+        self.bin_id = "68f85679ae596e708f231819"  # Your existing bin ID
         self.base_url = "https://api.jsonbin.io/v3/b"
         
-    def create_bin(self):
-        """Create a new bin with initial counters"""
-        initial_data = {
-            "counters": {
-                "IND": 0, "BR": 0, "SG": 0, 
-                "BD": 0, "ME": 0, "NA": 0
-            }
-        }
-        
-        headers = {
-            "Content-Type": "application/json",
-            "X-Master-Key": self.api_key,
-            "X-Bin-Name": "LikeBot Counters"
-        }
-        
-        try:
-            response = requests.post(self.base_url, json=initial_data, headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                self.bin_id = data['metadata']['id']
-                app.logger.info(f"✅ Created JSONBin with ID: {self.bin_id}")
-                return True
-            else:
-                app.logger.error(f"❌ Failed to create JSONBin: {response.status_code} - {response.text}")
-        except Exception as e:
-            app.logger.error(f"❌ Error creating JSONBin: {e}")
-        return False
-    
     def get_counter(self, server_name):
         """Get counter from JSONBin"""
         try:
@@ -74,11 +46,6 @@ class JSONBinManager:
                 counter = data['record']['counters'].get(server_name, 0)
                 app.logger.info(f"Loaded counter for {server_name}: {counter}")
                 return counter
-            elif response.status_code == 404:
-                # Bin doesn't exist, create it
-                app.logger.info("JSONBin not found, creating new one...")
-                if self.create_bin():
-                    return 0
         except Exception as e:
             app.logger.error(f"Error reading counter for {server_name}: {e}")
         
@@ -96,9 +63,6 @@ class JSONBinManager:
                 data = response.json()
                 current_data = data['record']
             else:
-                # Create new bin if doesn't exist
-                if not self.create_bin():
-                    return False
                 current_data = {"counters": {"IND": 0, "BR": 0, "SG": 0, "BD": 0, "ME": 0, "NA": 0}}
             
             # Update the specific counter
@@ -114,84 +78,18 @@ class JSONBinManager:
             update_response = requests.put(update_url, json=current_data, headers=update_headers)
             
             if update_response.status_code == 200:
-                app.logger.info(f"Updated counter for {server_name} to {new_value} in JSONBin")
+                app.logger.info(f"✅ Updated counter for {server_name} to {new_value} in JSONBin")
                 return True
             else:
-                app.logger.error(f"Failed to update JSONBin: {update_response.status_code}")
+                app.logger.error(f"❌ Failed to update JSONBin: {update_response.status_code} - {update_response.text}")
                 
         except Exception as e:
-            app.logger.error(f"Error updating counter for {server_name}: {e}")
-        
-        return False
-    
-    def reset_all_counters(self):
-        """Reset all counters to 0"""
-        try:
-            reset_data = {
-                "counters": {
-                    "IND": 0, "BR": 0, "SG": 0, 
-                    "BD": 0, "ME": 0, "NA": 0
-                }
-            }
-            
-            headers = {
-                "Content-Type": "application/json",
-                "X-Master-Key": self.api_key
-            }
-            
-            url = f"{self.base_url}/{self.bin_id}"
-            response = requests.put(url, json=reset_data, headers=headers)
-            
-            if response.status_code == 200:
-                app.logger.info("Reset all counters to 0 in JSONBin")
-                return True
-                
-        except Exception as e:
-            app.logger.error(f"Error resetting counters: {e}")
+            app.logger.error(f"❌ Error updating counter for {server_name}: {e}")
         
         return False
 
 # Initialize JSONBin
 jsonbin_db = JSONBinManager()
-
-# === DAILY RESET SCHEDULER ===
-def reset_scheduler():
-    """Reset counters daily at 4:30 AM India time"""
-    india_tz = pytz.timezone('Asia/Kolkata')
-    
-    while True:
-        try:
-            now = datetime.now(india_tz)
-            
-            # Set target time to 4:30 AM
-            target_time = now.replace(hour=4, minute=30, second=0, microsecond=0)
-            
-            # If it's already past 4:30 AM, schedule for next day
-            if now > target_time:
-                target_time += timedelta(days=1)
-            
-            # Calculate sleep time
-            sleep_seconds = (target_time - now).total_seconds()
-            
-            app.logger.info(f"Next counter reset scheduled at: {target_time} (in {sleep_seconds/3600:.2f} hours)")
-            
-            # Sleep until 4:30 AM
-            time.sleep(sleep_seconds)
-            
-            # Reset all counters
-            app.logger.info("🕧 4:30 AM - Resetting all counters to 0")
-            jsonbin_db.reset_all_counters()
-            
-            # Sleep for a minute to avoid multiple resets
-            time.sleep(60)
-            
-        except Exception as e:
-            app.logger.error(f"Error in reset scheduler: {e}")
-            time.sleep(300)  # Wait 5 minutes before retrying
-
-# Start the reset scheduler in a background thread
-reset_thread = threading.Thread(target=reset_scheduler, daemon=True)
-reset_thread.start()
 
 # === DOWNLOAD PROTOBUF FILES FROM GITHUB ===
 def download_protobuf_files():
@@ -232,31 +130,33 @@ except ImportError as e:
 TOKEN_FILES = {
     "IND": "token_ind.json",
     "BD": "token_bd.json", 
-    "ME": "token_bd.json",      # ME uses BD tokens
-    "EU": "token_bd.json",      # EU uses BD tokens  
-    "SG": "token_bd.json",      # SG uses BD tokens
-    "NA": "token_bd.json",      # NA uses BD tokens
+    "ME": "token_bd.json",
+    "EU": "token_bd.json", 
+    "SG": "token_bd.json",
+    "NA": "token_bd.json",
     "BR": "token_br.json",
     "cis": "token_br.json",
     "VN": "token_vn.json",
-    "ID": "token_bd.json",      # ID uses BD tokens
-    "PK": "token_bd.json",      # PK uses BD tokens
-    "mena": "token_bd.json"     # mena uses BD tokens
+    "ID": "token_bd.json",
+    "PK": "token_bd.json",
+    "mena": "token_bd.json"
 }
 
 # === Request Throttler for FreeFire API ===
 class RequestThrottler:
-    def __init__(self, max_concurrent=50, delay_between_batches=0.1):
+    def __init__(self, max_concurrent=100, delay_between_requests=0.05):  # CHANGED: 100 concurrent, faster
         self.max_concurrent = max_concurrent
-        self.delay_between_batches = delay_between_batches
+        self.delay_between_requests = delay_between_requests
         self.semaphore = asyncio.Semaphore(max_concurrent)
     
     async def throttle_request(self, coro):
         async with self.semaphore:
+            # Small delay between requests to avoid overwhelming
+            await asyncio.sleep(self.delay_between_requests)
             return await coro
 
-# Initialize request throttler
-request_throttler = RequestThrottler(max_concurrent=50, delay_between_batches=0.1)
+# Initialize request throttler - CHANGED: 100 concurrent requests
+request_throttler = RequestThrottler(max_concurrent=100, delay_between_requests=0.05)
 
 # === LOCAL TOKEN CACHE ===
 class TokenCache:
@@ -407,11 +307,12 @@ async def send_request(encrypted_uid, token, url):
             async with session.post(url, data=edata, headers=headers) as response:
                 if response.status != 200:
                     app.logger.error(f"Request failed with status: {response.status} for token: {token[:10]}...")
-                    return response.status
-                return await response.text()
+                    return {"status": response.status, "success": False}
+                response_text = await response.text()
+                return {"status": 200, "success": True, "response": response_text}
     except Exception as e:
         app.logger.error(f"Exception in send_request: {e}")
-        return None
+        return {"status": 0, "success": False, "error": str(e)}
 
 async def send_multiple_requests(uid, server_name, url):
     try:
@@ -431,7 +332,7 @@ async def send_multiple_requests(uid, server_name, url):
             app.logger.error("Failed to load tokens from the specified range.")
             return None
         
-        app.logger.info(f"Sending {len(tokens)} requests for {server_name}")
+        app.logger.info(f"🚀 Sending {len(tokens)} requests for {server_name}")
         
         tasks = []
         # Send ALL requests using ALL tokens (up to 100)
@@ -443,8 +344,8 @@ async def send_multiple_requests(uid, server_name, url):
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         # Count successful requests (status 200)
-        successful_requests = sum(1 for result in results if result == 200)
-        app.logger.info(f"Request completion: {successful_requests}/{len(tokens)} successful")
+        successful_requests = sum(1 for result in results if isinstance(result, dict) and result.get("status") == 200)
+        app.logger.info(f"✅ Request completion: {successful_requests}/{len(tokens)} successful")
         
         return successful_requests
     except Exception as e:
@@ -504,11 +405,11 @@ def handle_requests():
 
     try:
         def process_request():
-            app.logger.info(f"Starting request processing for UID: {uid}, Server: {server_name}")
+            app.logger.info(f"🚀 Starting request processing for UID: {uid}, Server: {server_name}")
             
             # Get current counter BEFORE processing - JSONBIN
             current_counter = get_counter(server_name)
-            app.logger.info(f"Current counter for {server_name}: {current_counter}")
+            app.logger.info(f"📊 Current counter for {server_name}: {current_counter}")
             
             tokens_all = token_cache.get_tokens(server_name)
             if tokens_all is None:
@@ -533,7 +434,7 @@ def handle_requests():
                 before_like = int(before_like)
             except Exception:
                 before_like = 0
-            app.logger.info(f"Likes before command: {before_like}")
+            app.logger.info(f"❤️ Likes before command: {before_like}")
 
             if server_name == "IND":
                 url = "https://client.ind.freefiremobile.com/LikeProfile"
@@ -567,37 +468,25 @@ def handle_requests():
                 "UID": player_uid,
                 "status": status
             }
-            app.logger.info(f"Request processed successfully for UID: {uid}. Result: {result}")
+            app.logger.info(f"✅ Request processed successfully for UID: {uid}. Result: {result}")
             
             # Update counter based on successful requests - JSONBIN
             if successful_requests and successful_requests > 0:
                 new_counter = current_counter + successful_requests
-                app.logger.info(f"Updating counter for {server_name} from {current_counter} to {new_counter} ({successful_requests} successful requests)")
+                app.logger.info(f"🔄 Updating counter for {server_name} from {current_counter} to {new_counter} ({successful_requests} successful requests)")
                 if update_counter(server_name, new_counter):
-                    app.logger.info(f"Successfully updated counter for {server_name} to {new_counter} in JSONBin")
+                    app.logger.info(f"✅ Successfully updated counter for {server_name} to {new_counter} in JSONBin")
                 else:
-                    app.logger.error(f"Failed to update counter for {server_name} in JSONBin")
+                    app.logger.error(f"❌ Failed to update counter for {server_name} in JSONBin")
             else:
-                app.logger.info(f"No successful requests, counter remains at {current_counter}")
+                app.logger.info(f"ℹ️ No successful requests, counter remains at {current_counter}")
                 
             return result
 
         result = process_request()
         return jsonify(result)
     except Exception as e:
-        app.logger.error(f"Error processing request: {e}")
-        return jsonify({"error": str(e)}), 500
-
-# === Manual Reset Endpoint ===
-@app.route('/reset-counters', methods=['POST'])
-def reset_counters():
-    """Manual endpoint to reset all counters"""
-    try:
-        if jsonbin_db.reset_all_counters():
-            return jsonify({"message": "All counters reset successfully!"})
-        else:
-            return jsonify({"error": "Failed to reset counters"}), 500
-    except Exception as e:
+        app.logger.error(f"❌ Error processing request: {e}")
         return jsonify({"error": str(e)}), 500
 
 # === Check All Counters Endpoint ===
@@ -608,15 +497,7 @@ def get_all_counters():
         # Get current data from JSONBin
         headers = {"X-Master-Key": "$2a$10$0kbiUob1JFhNgyTFoWence/ntnK3VDbg2FCEBAxTXDnWuMfjk3HNW"}
         
-        # If bin_id exists, use it; otherwise create new bin
-        if hasattr(jsonbin_db, 'bin_id') and jsonbin_db.bin_id:
-            url = f"https://api.jsonbin.io/v3/b/{jsonbin_db.bin_id}/latest"
-        else:
-            # Create new bin first
-            if jsonbin_db.create_bin():
-                url = f"https://api.jsonbin.io/v3/b/{jsonbin_db.bin_id}/latest"
-            else:
-                return jsonify({"error": "Failed to create JSONBin"}), 500
+        url = f"https://api.jsonbin.io/v3/b/68f85679ae596e708f231819/latest"
         
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
@@ -630,7 +511,7 @@ def get_all_counters():
                 "message": "Current counters from JSONBin",
                 "counters": counters,
                 "total_requests": total_requests,
-                "bin_id": jsonbin_db.bin_id,
+                "bin_id": "68f85679ae596e708f231819",
                 "last_updated": datetime.now().isoformat()
             })
         else:
@@ -641,8 +522,8 @@ def get_all_counters():
 
 @app.route('/')
 def home():
-    return jsonify({"message": "Like Bot API is running with JSONBIN & Auto Reset!", "status": "active"})
+    return jsonify({"message": "Like Bot API is running with JSONBIN!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with JSONBIN & Daily 4:30 AM Reset!")
+    app.logger.info("🚀 Server started with JSONBIN - 100 TOKENS & Counter System!")
     app.run(debug=True, host='0.0.0.0', port=5001)
