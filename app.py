@@ -232,13 +232,16 @@ except ImportError as e:
 TOKEN_FILES = {
     "IND": "token_ind.json",
     "BD": "token_bd.json", 
-    "ME": "token_bd.json",
-    "EU": "token_bd.json", 
-    "SG": "token_bd.json",
-    "NA": "token_bd.json",
+    "ME": "token_bd.json",      # ME uses BD tokens
+    "EU": "token_bd.json",      # EU uses BD tokens  
+    "SG": "token_bd.json",      # SG uses BD tokens
+    "NA": "token_bd.json",      # NA uses BD tokens
     "BR": "token_br.json",
     "cis": "token_br.json",
-    "VN": "token_vn.json"
+    "VN": "token_vn.json",
+    "ID": "token_bd.json",      # ID uses BD tokens
+    "PK": "token_bd.json",      # PK uses BD tokens
+    "mena": "token_bd.json"     # mena uses BD tokens
 }
 
 # === Request Throttler for FreeFire API ===
@@ -594,6 +597,45 @@ def reset_counters():
             return jsonify({"message": "All counters reset successfully!"})
         else:
             return jsonify({"error": "Failed to reset counters"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# === Check All Counters Endpoint ===
+@app.route('/counters', methods=['GET'])
+def get_all_counters():
+    """Get all current counters from JSONBin"""
+    try:
+        # Get current data from JSONBin
+        headers = {"X-Master-Key": "$2a$10$0kbiUob1JFhNgyTFoWence/ntnK3VDbg2FCEBAxTXDnWuMfjk3HNW"}
+        
+        # If bin_id exists, use it; otherwise create new bin
+        if hasattr(jsonbin_db, 'bin_id') and jsonbin_db.bin_id:
+            url = f"https://api.jsonbin.io/v3/b/{jsonbin_db.bin_id}/latest"
+        else:
+            # Create new bin first
+            if jsonbin_db.create_bin():
+                url = f"https://api.jsonbin.io/v3/b/{jsonbin_db.bin_id}/latest"
+            else:
+                return jsonify({"error": "Failed to create JSONBin"}), 500
+        
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            counters = data['record']['counters']
+            
+            # Calculate total requests
+            total_requests = sum(counters.values())
+            
+            return jsonify({
+                "message": "Current counters from JSONBin",
+                "counters": counters,
+                "total_requests": total_requests,
+                "bin_id": jsonbin_db.bin_id,
+                "last_updated": datetime.now().isoformat()
+            })
+        else:
+            return jsonify({"error": f"Failed to fetch counters: {response.status_code}"}), 500
+            
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
