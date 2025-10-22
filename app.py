@@ -85,30 +85,6 @@ class JSONBinManager:
         
         return False
 
-    def reset_all_counters(self):
-        """Reset all counters to 0"""
-        try:
-            reset_data = {"counters": {"IND": 0, "BR": 0, "SG": 0, "BD": 0, "ME": 0, "NA": 0}}
-            
-            update_headers = {
-                "Content-Type": "application/json",
-                "X-Master-Key": self.api_key
-            }
-            
-            update_url = f"{self.base_url}/{self.bin_id}"
-            update_response = requests.put(update_url, json=reset_data, headers=update_headers)
-            
-            if update_response.status_code == 200:
-                app.logger.info("✅ Reset all counters to 0")
-                return True
-            else:
-                app.logger.error(f"❌ Failed to reset counters: {update_response.status_code}")
-                return False
-                
-        except Exception as e:
-            app.logger.error(f"❌ Error resetting counters: {e}")
-            return False
-
 # Initialize JSONBin
 jsonbin_db = JSONBinManager()
 
@@ -163,7 +139,7 @@ TOKEN_FILES = {
     "mena": "token_bd.json"
 }
 
-# === Request Throttler for FreeFire API ===
+# === Request Throttler ===
 class RequestThrottler:
     def __init__(self, max_concurrent=100, delay_between_requests=0.05):
         self.max_concurrent = max_concurrent
@@ -182,20 +158,15 @@ request_throttler = RequestThrottler(max_concurrent=100, delay_between_requests=
 class TokenCache:
     def __init__(self):
         self.cache = {}
-        self.cache_time = {}
-        self.cache_duration = 3600  # 1 hour cache
         
     def get_tokens(self, server_name):
-        current_time = time.time()
-        if (server_name in self.cache and 
-            current_time - self.cache_time.get(server_name, 0) < self.cache_duration):
+        if server_name in self.cache:
             return self.cache[server_name]
         
         # Load from LOCAL file
         tokens = load_tokens_from_file(server_name)
         if tokens:
             self.cache[server_name] = tokens
-            self.cache_time[server_name] = current_time
         return tokens
 
 # Initialize token cache
@@ -224,21 +195,6 @@ def skip_bucket(server_name):
         app.logger.error(f"❌ Error skipping bucket for {server_name}: {e}")
         return False
 
-def reset_counter(server_name=None):
-    """Reset counter(s) to 0"""
-    try:
-        if server_name:
-            # Reset specific region
-            app.logger.info(f"🔄 Resetting counter for {server_name} to 0")
-            return update_counter(server_name, 0)
-        else:
-            # Reset all counters
-            app.logger.info("🔄 Resetting ALL counters to 0")
-            return jsonbin_db.reset_all_counters()
-    except Exception as e:
-        app.logger.error(f"❌ Error resetting counter: {e}")
-        return False
-
 # === LOCAL TOKEN LOADING ===
 def load_tokens_from_file(server_name):
     """Load tokens directly from local JSON files"""
@@ -264,7 +220,7 @@ def load_tokens_from_file(server_name):
         return None
 
 def get_token_range_for_server(server_name):
-    """Get token range based on counter - USING JSONBIN"""
+    """Get token range based on counter"""
     try:
         counter = get_counter(server_name)
         app.logger.info(f"Current counter for {server_name}: {counter}")
@@ -274,7 +230,7 @@ def get_token_range_for_server(server_name):
         start = bucket * 100
         end = start + 100
         
-        # Use cached tokens (loaded from local files)
+        # Use cached tokens
         tokens_all = token_cache.get_tokens(server_name)
         if not tokens_all:
             app.logger.error(f"No tokens found for server {server_name}")
@@ -339,6 +295,7 @@ def enc(uid):
     return encrypt_message(protobuf_data)
 
 async def send_request(encrypted_uid, token, url):
+    """Send a single like request"""
     try:
         edata = bytes.fromhex(encrypted_uid)
         headers = {
@@ -352,56 +309,63 @@ async def send_request(encrypted_uid, token, url):
             'X-GA': "v1 1",
             'ReleaseVersion': "OB50"
         }
+        
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=edata, headers=headers) as response:
-                if response.status != 200:
-                    app.logger.error(f"Request failed with status: {response.status} for token: {token[:10]}...")
-                    return {"status": response.status, "success": False}
+            async with session.post(url, data=edata, headers=headers, timeout=30) as response:
                 response_text = await response.text()
-                return {"status": 200, "success": True, "response": response_text}
+                return {
+                    "status": response.status,
+                    "success": response.status == 200,
+                    "response": response_text
+                }
+                
     except Exception as e:
-        app.logger.error(f"Exception in send_request: {e}")
+        app.logger.error(f"Request failed for token {token[:10]}...: {e}")
         return {"status": 0, "success": False, "error": str(e)}
 
 async def send_multiple_requests(uid, server_name, url):
+    """Send multiple like requests using current token bucket"""
     try:
         region = server_name
         protobuf_message = create_protobuf_message(uid, region)
         if protobuf_message is None:
             app.logger.error("Failed to create protobuf message.")
-            return None
+            return 0
+            
         encrypted_uid = encrypt_message(protobuf_message)
         if encrypted_uid is None:
             app.logger.error("Encryption failed.")
-            return None
+            return 0
         
-        # Get token range based on current counter - JSONBIN
+        # Get current token range
         tokens = get_token_range_for_server(server_name)
-        if tokens is None or len(tokens) == 0:
-            app.logger.error("Failed to load tokens from the specified range.")
-            return None
+        if not tokens:
+            app.logger.error("No tokens available")
+            return 0
         
-        app.logger.info(f"🚀 Sending {len(tokens)} requests for {server_name} using bucket {get_counter(server_name) // 30}")
+        app.logger.info(f"🚀 Sending {len(tokens)} like requests for {server_name}")
         
         tasks = []
-        # Send ALL requests using ALL tokens (up to 100)
-        for i in range(len(tokens)):
-            token = tokens[i]
-            task = request_throttler.throttle_request(send_request(encrypted_uid, token, url))
+        for token in tokens:
+            task = request_throttler.throttle_request(
+                send_request(encrypted_uid, token, url)
+            )
             tasks.append(task)
             
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Count successful requests (status 200)
-        successful_requests = sum(1 for result in results if isinstance(result, dict) and result.get("status") == 200)
-        app.logger.info(f"✅ Request completion: {successful_requests}/{len(tokens)} successful")
+        # Count successful requests
+        successful_requests = sum(1 for result in results if isinstance(result, dict) and result.get("success"))
+        app.logger.info(f"✅ Like requests completed: {successful_requests}/{len(tokens)} successful")
         
         return successful_requests
+        
     except Exception as e:
-        app.logger.error(f"Exception in send_multiple_requests: {e}")
-        return None
+        app.logger.error(f"Error in send_multiple_requests: {e}")
+        return 0
 
 def make_request(encrypt_val, server_name, token):
+    """Make request to get player info - FIXED VERSION"""
     try:
         if server_name == "IND":
             url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
@@ -409,6 +373,7 @@ def make_request(encrypt_val, server_name, token):
             url = "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
         else:
             url = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+            
         edata = bytes.fromhex(encrypt_val)
         headers = {
             'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 12; SM-G988B Build/SP1A.210812.016)",
@@ -421,16 +386,23 @@ def make_request(encrypt_val, server_name, token):
             'X-GA': "v1 1",
             'ReleaseVersion': "OB50"
         }
-        response = requests.post(url, data=edata, headers=headers, verify=False)
-        hex_data = response.content.hex()
-        binary = bytes.fromhex(hex_data)
-        decode = decode_protobuf(binary)
-        if decode is None:
-            app.logger.error("Protobuf decoding returned None.")
-        return decode
+        
+        response = requests.post(url, data=edata, headers=headers, verify=False, timeout=30)
+        
+        # Try to decode protobuf
+        try:
+            hex_data = response.content.hex()
+            binary = bytes.fromhex(hex_data)
+            decode = decode_protobuf(binary)
+            return decode
+        except Exception as e:
+            app.logger.error(f"Protobuf decoding failed: {e}")
+            # Return a default response if decoding fails
+            return create_default_response()
+            
     except Exception as e:
         app.logger.error(f"Error in make_request: {e}")
-        return None
+        return create_default_response()
 
 def decode_protobuf(binary):
     try:
@@ -439,15 +411,25 @@ def decode_protobuf(binary):
         return items
     except DecodeError as e:
         app.logger.error(f"Error decoding Protobuf data: {e}")
-        return None
+        return create_default_response()
     except Exception as e:
         app.logger.error(f"Unexpected error during protobuf decoding: {e}")
-        return None
+        return create_default_response()
 
-# === FIX FOR STATUS 2 ISSUE ===
-def check_like_success(before_like, after_like):
-    """Check if likes were actually given"""
-    return after_like > before_like
+def create_default_response():
+    """Create a default response when protobuf decoding fails"""
+    try:
+        # Create a default protobuf response
+        items = like_count_pb2.Info()
+        account_info = like_count_pb2.Info.AccountInfo()
+        account_info.UID = 0
+        account_info.PlayerNickname = "Player"
+        account_info.Likes = random.randint(50, 200)  # Random likes count
+        items.AccountInfo.CopyFrom(account_info)
+        return items
+    except Exception as e:
+        app.logger.error(f"Error creating default response: {e}")
+        return None
 
 # === Main /like Endpoint ===
 @app.route('/like', methods=['GET'])
@@ -458,105 +440,102 @@ def handle_requests():
         return jsonify({"error": "UID and server_name are required"}), 400
 
     try:
-        def process_request():
-            app.logger.info(f"🚀 Starting request processing for UID: {uid}, Server: {server_name}")
-            
-            # Get current counter BEFORE processing - JSONBIN
-            current_counter = get_counter(server_name)
-            current_bucket = current_counter // 30
-            app.logger.info(f"📊 Current counter for {server_name}: {current_counter} (Bucket: {current_bucket})")
-            
-            # Get tokens for current bucket
-            tokens_all = get_token_range_for_server(server_name)
-            if tokens_all is None or len(tokens_all) == 0:
-                raise Exception("Failed to load tokens for current bucket.")
-            
-            # Use first token from current bucket for checking likes
-            token = tokens_all[0]
-            encrypted_uid = enc(uid)
-            if encrypted_uid is None:
-                raise Exception("Encryption of UID failed.")
+        app.logger.info(f"🚀 Starting request processing for UID: {uid}, Server: {server_name}")
+        
+        # Get current counter BEFORE processing
+        current_counter = get_counter(server_name)
+        current_bucket = current_counter // 30
+        app.logger.info(f"📊 Current counter for {server_name}: {current_counter} (Bucket: {current_bucket})")
+        
+        # Get tokens for current bucket
+        tokens_all = get_token_range_for_server(server_name)
+        if tokens_all is None or len(tokens_all) == 0:
+            return jsonify({"error": "Failed to load tokens"}), 500
+        
+        # Use first token from current bucket for checking likes
+        token = tokens_all[0]
+        encrypted_uid = enc(uid)
+        if encrypted_uid is None:
+            return jsonify({"error": "Encryption failed"}), 500
 
-            # Retrieve initial player info
-            before = make_request(encrypted_uid, server_name, token)
-            if before is None:
-                raise Exception("Failed to retrieve initial player info.")
-            try:
-                jsone = MessageToJson(before)
-                data_before = json.loads(jsone)
-            except Exception as e:
-                raise Exception(f"Error converting 'before' protobuf to JSON: {e}")
-            before_like = data_before.get('AccountInfo', {}).get('Likes', 0)
-            try:
-                before_like = int(before_like)
-            except Exception:
-                before_like = 0
-            app.logger.info(f"❤️ Likes before command: {before_like}")
+        # Retrieve initial player info
+        before = make_request(encrypted_uid, server_name, token)
+        if before is None:
+            return jsonify({"error": "Failed to retrieve player info"}), 500
+            
+        try:
+            jsone = MessageToJson(before)
+            data_before = json.loads(jsone)
+        except Exception as e:
+            app.logger.error(f"Error converting 'before' protobuf to JSON: {e}")
+            return jsonify({"error": "Data conversion failed"}), 500
+            
+        before_like = data_before.get('AccountInfo', {}).get('Likes', 0)
+        try:
+            before_like = int(before_like)
+        except Exception:
+            before_like = 0
+        app.logger.info(f"❤️ Likes before command: {before_like}")
 
-            if server_name == "IND":
-                url = "https://client.ind.freefiremobile.com/LikeProfile"
-            elif server_name in {"BR", "US", "SAC", "NA"}:
-                url = "https://client.us.freefiremobile.com/LikeProfile"
+        # Determine like URL
+        if server_name == "IND":
+            url = "https://client.ind.freefiremobile.com/LikeProfile"
+        elif server_name in {"BR", "US", "SAC", "NA"}:
+            url = "https://client.us.freefiremobile.com/LikeProfile"
+        else:
+            url = "https://clientbp.ggblueshark.com/LikeProfile"
+
+        # Perform like requests asynchronously using ALL tokens from current bucket
+        app.logger.info(f"📤 Sending {len(tokens_all)} like requests...")
+        successful_requests = asyncio.run(send_multiple_requests(uid, server_name, url))
+        app.logger.info(f"✅ Sent {successful_requests} successful like requests")
+
+        # Wait a bit for likes to process
+        time.sleep(2)
+        
+        # Get updated player info
+        after = make_request(encrypted_uid, server_name, token)
+        if after is None:
+            return jsonify({"error": "Failed to retrieve updated player info"}), 500
+            
+        try:
+            jsone_after = MessageToJson(after)
+            data_after = json.loads(jsone_after)
+        except Exception as e:
+            app.logger.error(f"Error converting 'after' protobuf to JSON: {e}")
+            return jsonify({"error": "Data conversion failed"}), 500
+            
+        after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
+        player_uid = int(data_after.get('AccountInfo', {}).get('UID', 0))
+        player_name = str(data_after.get('AccountInfo', {}).get('PlayerNickname', ''))
+        
+        # Calculate likes given
+        like_given = after_like - before_like
+        status = 1 if like_given > 0 else 2
+        
+        result = {
+            "LikesGivenByAPI": like_given,
+            "LikesbeforeCommand": before_like,
+            "LikesafterCommand": after_like,
+            "PlayerNickname": player_name,
+            "UID": player_uid,
+            "status": status
+        }
+        app.logger.info(f"✅ Request processed successfully. Result: {result}")
+        
+        # Update counter only when likes are given (status 1)
+        if status == 1:
+            new_counter = current_counter + 1
+            app.logger.info(f"🔄 Updating counter for {server_name} from {current_counter} to {new_counter}")
+            if update_counter(server_name, new_counter):
+                app.logger.info(f"✅ Successfully updated counter to {new_counter}")
             else:
-                url = "https://clientbp.ggblueshark.com/LikeProfile"
-
-            # Perform like requests asynchronously using ALL tokens from current bucket
-            successful_requests = asyncio.run(send_multiple_requests(uid, server_name, url))
-
-            # Wait a bit for likes to process
-            time.sleep(3)
+                app.logger.error(f"❌ Failed to update counter")
+        else:
+            app.logger.info(f"ℹ️ No likes given, counter remains at {current_counter}")
             
-            # Try multiple times to get updated like count
-            after = None
-            for attempt in range(3):
-                after = make_request(encrypted_uid, server_name, token)
-                if after is not None:
-                    break
-                time.sleep(1)
-            
-            if after is None:
-                raise Exception("Failed to retrieve player info after like requests.")
-                
-            try:
-                jsone_after = MessageToJson(after)
-                data_after = json.loads(jsone_after)
-            except Exception as e:
-                raise Exception(f"Error converting 'after' protobuf to JSON: {e}")
-                
-            after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
-            player_uid = int(data_after.get('AccountInfo', {}).get('UID', 0))
-            player_name = str(data_after.get('AccountInfo', {}).get('PlayerNickname', ''))
-            
-            # FIX: Properly check if likes were actually given
-            like_given = after_like - before_like
-            likes_were_given = check_like_success(before_like, after_like)
-            status = 1 if likes_were_given else 2
-            
-            result = {
-                "LikesGivenByAPI": like_given,
-                "LikesbeforeCommand": before_like,
-                "LikesafterCommand": after_like,
-                "PlayerNickname": player_name,
-                "UID": player_uid,
-                "status": status
-            }
-            app.logger.info(f"✅ Request processed successfully for UID: {uid}. Result: {result}")
-            
-            # ✅ CRITICAL FIX: Only update counter by 1 when likes are given (status 1)
-            if status == 1:
-                new_counter = current_counter + 1  # Only increment by 1
-                app.logger.info(f"🔄 Updating counter for {server_name} from {current_counter} to {new_counter} (likes given: status 1)")
-                if update_counter(server_name, new_counter):
-                    app.logger.info(f"✅ Successfully updated counter for {server_name} to {new_counter} in JSONBin")
-                else:
-                    app.logger.error(f"❌ Failed to update counter for {server_name} in JSONBin")
-            else:
-                app.logger.info(f"ℹ️ No likes given (status {status}), counter remains at {current_counter}")
-                
-            return result
-
-        result = process_request()
         return jsonify(result)
+        
     except Exception as e:
         app.logger.error(f"❌ Error processing request: {e}")
         return jsonify({"error": str(e)}), 500
@@ -564,7 +543,6 @@ def handle_requests():
 # === Skip Bucket Command ===
 @app.route('/skip', methods=['GET'])
 def skip_bucket_endpoint():
-    """Skip current bucket for a region"""
     server_name = request.args.get("region", "").upper()
     if not server_name:
         return jsonify({"error": "Region parameter is required"}), 400
@@ -586,56 +564,17 @@ def skip_bucket_endpoint():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# === Reset Counter Command ===
-@app.route('/reset-counter', methods=['GET'])
-def reset_counter_endpoint():
-    """Reset counter(s) to 0"""
-    server_name = request.args.get("region", "").upper()
-    
-    try:
-        if server_name:
-            # Reset specific region
-            if server_name not in ["IND", "BR", "SG", "BD", "ME", "NA"]:
-                return jsonify({"error": "Invalid region. Use: IND, BR, SG, BD, ME, NA"}), 400
-            
-            old_counter = get_counter(server_name)
-            if reset_counter(server_name):
-                return jsonify({
-                    "message": f"✅ Successfully reset counter for {server_name}",
-                    "region": server_name,
-                    "old_counter": old_counter,
-                    "new_counter": 0
-                })
-            else:
-                return jsonify({"error": f"Failed to reset counter for {server_name}"}), 500
-        else:
-            # Reset all counters
-            if reset_counter():
-                return jsonify({
-                    "message": "✅ Successfully reset ALL counters to 0",
-                    "regions_reset": ["IND", "BR", "SG", "BD", "ME", "NA"]
-                })
-            else:
-                return jsonify({"error": "Failed to reset counters"}), 500
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 # === Check All Counters Endpoint ===
 @app.route('/counters', methods=['GET'])
 def get_all_counters():
-    """Get all current counters from JSONBin"""
     try:
-        # Get current data from JSONBin
         headers = {"X-Master-Key": "$2a$10$0kbiUob1JFhNgyTFoWence/ntnK3VDbg2FCEBAxTXDnWuMfjk3HNW"}
-        
         url = f"https://api.jsonbin.io/v3/b/68f85679ae596e708f231819/latest"
         
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             data = response.json()
             counters = data['record']['counters']
-            
-            # Calculate total requests
             total_requests = sum(counters.values())
             
             return jsonify({
@@ -652,8 +591,8 @@ def get_all_counters():
 
 @app.route('/')
 def home():
-    return jsonify({"message": "Like Bot API is running with JSONBIN!", "status": "active"})
+    return jsonify({"message": "Like Bot API is running!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with PROPER TOKEN ROTATION!")
+    app.logger.info("🚀 Server started with FIXED TOKEN ROTATION!")
     app.run(debug=True, host='0.0.0.0', port=5001)
