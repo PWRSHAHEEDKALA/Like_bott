@@ -23,48 +23,44 @@ from Crypto.Util.Padding import pad
 from google.protobuf.json_format import MessageToJson
 from google.protobuf.message import DecodeError
 import random
-from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure
+from supabase import create_client, Client
 import threading
 
 app = Flask(__name__)
 
-# === MongoDB Atlas Setup ===
-class MongoDBManager:
+# === Supabase Setup ===
+class SupabaseManager:
     def __init__(self):
-        self.client = None
-        self.db = None
+        self.supabase: Client = None
         self.connect()
     
     def connect(self):
         try:
-            # Your MongoDB connection string
-            connection_string = "mongodb+srv://nassemaaqib_db_user:Vid6eOLjws9IMiU6@cluster0.xrd9thx.mongodb.net/Aruu?retryWrites=true&w=majority&appName=Cluster0"
+            # Replace with your actual Supabase credentials
+            SUPABASE_URL = "https://epaxyzvwdrmxezbmrchl.supabase.co"
+            SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVwYXh5enZ3ZHJteGV6Ym1yY2hsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA5MzUzNzksImV4cCI6MjA3NjUxMTM3OX0.J8qjFA39MOzUhXAKaiEZrPX0EeMeOe3wYTgWDjIk6zo"
             
-            self.client = MongoClient(connection_string, serverSelectionTimeoutMS=10000)
-            self.db = self.client['Aruu']
-            
-            # Test connection
-            self.client.admin.command('ismaster')
-            app.logger.info("✅ MongoDB Atlas connected successfully!")
+            self.supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+            app.logger.info("✅ Supabase connected successfully!")
             
         except Exception as e:
-            app.logger.error(f"❌ MongoDB connection failed: {e}")
-            self.client = None
-            self.db = None
+            app.logger.error(f"❌ Supabase connection failed: {e}")
+            self.supabase = None
     
     def get_counter(self, server_name):
-        if not self.db:
+        if not self.supabase:
             self.connect()
-            if not self.db:
+            if not self.supabase:
                 return 0
                 
         try:
-            counters_collection = self.db['Counters']
-            counter_data = counters_collection.find_one({'server_name': server_name})
+            response = self.supabase.table("counters")\
+                .select("counter")\
+                .eq("server_name", server_name)\
+                .execute()
             
-            if counter_data:
-                counter_value = counter_data.get('counter', 0)
+            if response.data and len(response.data) > 0:
+                counter_value = response.data[0]['counter']
                 app.logger.info(f"Loaded counter for {server_name}: {counter_value}")
                 return counter_value
             else:
@@ -78,19 +74,21 @@ class MongoDBManager:
             return 0
     
     def update_counter(self, server_name, new_value):
-        if not self.db:
+        if not self.supabase:
             self.connect()
-            if not self.db:
+            if not self.supabase:
                 return False
                 
         try:
-            counters_collection = self.db['Counters']
-            counters_collection.update_one(
-                {'server_name': server_name},
-                {'$set': {'counter': new_value, 'last_updated': datetime.now()}},
-                upsert=True
-            )
-            app.logger.info(f"Updated counter for {server_name} to {new_value} in MongoDB")
+            response = self.supabase.table("counters")\
+                .upsert({
+                    "server_name": server_name,
+                    "counter": new_value,
+                    "last_updated": datetime.now().isoformat()
+                })\
+                .execute()
+            
+            app.logger.info(f"Updated counter for {server_name} to {new_value} in Supabase")
             return True
         except Exception as e:
             app.logger.error(f"Error updating counter for {server_name}: {e}")
@@ -98,21 +96,21 @@ class MongoDBManager:
     
     def reset_all_counters(self):
         """Reset all counters to 0 - for daily reset"""
-        if not self.db:
+        if not self.supabase:
             self.connect()
-            if not self.db:
+            if not self.supabase:
                 return False
                 
         try:
-            counters_collection = self.db['Counters']
             servers = ["IND", "BR", "SG", "BD", "ME", "NA"]
-            
             for server in servers:
-                counters_collection.update_one(
-                    {'server_name': server},
-                    {'$set': {'counter': 0, 'last_reset': datetime.now()}},
-                    upsert=True
-                )
+                self.supabase.table("counters")\
+                    .upsert({
+                        "server_name": server,
+                        "counter": 0,
+                        "last_updated": datetime.now().isoformat()
+                    })\
+                    .execute()
             
             app.logger.info("Reset all counters to 0")
             return True
@@ -120,8 +118,8 @@ class MongoDBManager:
             app.logger.error(f"Error resetting counters: {e}")
             return False
 
-# Initialize MongoDB
-mongo_db = MongoDBManager()
+# Initialize Supabase
+supabase_db = SupabaseManager()
 
 # === DAILY RESET SCHEDULER ===
 def reset_scheduler():
@@ -149,7 +147,7 @@ def reset_scheduler():
             
             # Reset all counters
             app.logger.info("🕧 4:30 AM - Resetting all counters to 0")
-            mongo_db.reset_all_counters()
+            supabase_db.reset_all_counters()
             
             # Sleep for a minute to avoid multiple resets
             time.sleep(60)
@@ -212,14 +210,14 @@ class TokenCache:
 # Initialize token cache
 token_cache = TokenCache()
 
-# === MONGODB COUNTER SYSTEM ===
+# === SUPABASE COUNTER SYSTEM ===
 def get_counter(server_name):
-    """Get counter from MongoDB Atlas"""
-    return mongo_db.get_counter(server_name)
+    """Get counter from Supabase"""
+    return supabase_db.get_counter(server_name)
 
 def update_counter(server_name, new_value):
-    """Update counter in MongoDB Atlas"""
-    return mongo_db.update_counter(server_name, new_value)
+    """Update counter in Supabase"""
+    return supabase_db.update_counter(server_name, new_value)
 
 # === LOCAL TOKEN LOADING ===
 def load_tokens_from_file(server_name):
@@ -246,7 +244,7 @@ def load_tokens_from_file(server_name):
         return None
 
 def get_token_range_for_server(server_name):
-    """Get token range based on counter - USING MONGODB"""
+    """Get token range based on counter - USING SUPABASE"""
     try:
         counter = get_counter(server_name)
         app.logger.info(f"Current counter for {server_name}: {counter}")
@@ -356,7 +354,7 @@ async def send_multiple_requests(uid, server_name, url):
             app.logger.error("Encryption failed.")
             return None
         
-        # Get token range based on current counter - MONGODB
+        # Get token range based on current counter - SUPABASE
         tokens = get_token_range_for_server(server_name)
         if tokens is None or len(tokens) == 0:
             app.logger.error("Failed to load tokens from the specified range.")
@@ -437,7 +435,7 @@ def handle_requests():
         def process_request():
             app.logger.info(f"Starting request processing for UID: {uid}, Server: {server_name}")
             
-            # Get current counter BEFORE processing - MONGODB
+            # Get current counter BEFORE processing - SUPABASE
             current_counter = get_counter(server_name)
             app.logger.info(f"Current counter for {server_name}: {current_counter}")
             
@@ -500,14 +498,14 @@ def handle_requests():
             }
             app.logger.info(f"Request processed successfully for UID: {uid}. Result: {result}")
             
-            # Update counter based on successful requests - MONGODB
+            # Update counter based on successful requests - SUPABASE
             if successful_requests and successful_requests > 0:
                 new_counter = current_counter + successful_requests
                 app.logger.info(f"Updating counter for {server_name} from {current_counter} to {new_counter} ({successful_requests} successful requests)")
                 if update_counter(server_name, new_counter):
-                    app.logger.info(f"Successfully updated counter for {server_name} to {new_counter} in MongoDB")
+                    app.logger.info(f"Successfully updated counter for {server_name} to {new_counter} in Supabase")
                 else:
-                    app.logger.error(f"Failed to update counter for {server_name} in MongoDB")
+                    app.logger.error(f"Failed to update counter for {server_name} in Supabase")
             else:
                 app.logger.info(f"No successful requests, counter remains at {current_counter}")
                 
@@ -524,7 +522,7 @@ def handle_requests():
 def reset_counters():
     """Manual endpoint to reset all counters"""
     try:
-        if mongo_db.reset_all_counters():
+        if supabase_db.reset_all_counters():
             return jsonify({"message": "All counters reset successfully!"})
         else:
             return jsonify({"error": "Failed to reset counters"}), 500
@@ -533,8 +531,8 @@ def reset_counters():
 
 @app.route('/')
 def home():
-    return jsonify({"message": "Like Bot API is running with MONGODB & Auto Reset!", "status": "active"})
+    return jsonify({"message": "Like Bot API is running with SUPABASE & Auto Reset!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with MONGODB Atlas & Daily 4:30 AM Reset!")
+    app.logger.info("🚀 Server started with SUPABASE & Daily 4:30 AM Reset!")
     app.run(debug=True, host='0.0.0.0', port=5001)
