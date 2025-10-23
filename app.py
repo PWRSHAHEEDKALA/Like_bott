@@ -88,6 +88,10 @@ class JSONBinManager:
             # Check auto-reset first
             auto_reset_manager.check_reset_needed()
             
+            # Map BD, SG, EU, ME, PK regions to BD counter
+            if server_name in ["BD", "SG", "EU", "ME", "PK"]:
+                server_name = "BD"
+            
             headers = {"X-Master-Key": self.api_key}
             url = f"{self.base_url}/{self.bin_id}/latest"
             
@@ -106,6 +110,10 @@ class JSONBinManager:
         try:
             # Check auto-reset first
             auto_reset_manager.check_reset_needed()
+            
+            # Map BD, SG, EU, ME, PK regions to BD counter
+            if server_name in ["BD", "SG", "EU", "ME", "PK"]:
+                server_name = "BD"
             
             # First get current data
             headers = {"X-Master-Key": self.api_key}
@@ -201,490 +209,346 @@ class RequestThrottler:
         self.max_concurrent = max_concurrent
         self.delay_between_requests = delay_between_requests
         self.semaphore = asyncio.Semaphore(max_concurrent)
-    
-    async def throttle_request(self, coro):
+        self.last_request_time = 0
+        
+    async def throttle_request(self):
+        """Throttle requests to avoid rate limiting"""
         async with self.semaphore:
-            await asyncio.sleep(self.delay_between_requests)
-            return await coro
+            current_time = time.time()
+            time_since_last = current_time - self.last_request_time
+            if time_since_last < self.delay_between_requests:
+                await asyncio.sleep(self.delay_between_requests - time_since_last)
+            self.last_request_time = time.time()
 
-# Initialize request throttler - ULTRA FAST!
-request_throttler = RequestThrottler(max_concurrent=100, delay_between_requests=0.001)
+throttler = RequestThrottler()
 
-# === LOCAL TOKEN CACHE ===
-class TokenCache:
-    def __init__(self):
-        self.cache = {}
-        
-    def get_tokens(self, server_name):
-        if server_name in self.cache:
-            return self.cache[server_name]
-        
-        # Load from LOCAL file
-        tokens = load_tokens_from_file(server_name)
-        if tokens:
-            self.cache[server_name] = tokens
-        return tokens
-
-# Initialize token cache
-token_cache = TokenCache()
-
-# === JSONBIN COUNTER SYSTEM ===
-def get_counter(server_name):
-    """Get counter from JSONBin"""
-    return jsonbin_db.get_counter(server_name)
-
-def update_counter(server_name, new_value):
-    """Update counter in JSONBin"""
-    return jsonbin_db.update_counter(server_name, new_value)
-
-def skip_bucket(server_name):
-    """Skip current bucket by advancing counter to next bucket"""
+# === AES ENCRYPTION ===
+def aes_encrypt(data, key):
+    """AES encryption function"""
     try:
-        current_counter = get_counter(server_name)
-        # Calculate next bucket start (current bucket * 30 + 30)
-        bucket = current_counter // 30
-        next_bucket_start = (bucket + 1) * 30
-        
-        app.logger.info(f"🔄 Skipping bucket for {server_name}: {current_counter} -> {next_bucket_start}")
-        return update_counter(server_name, next_bucket_start)
+        cipher = AES.new(key, AES.MODE_ECB)
+        encrypted = cipher.encrypt(pad(data, AES.block_size))
+        return base64.b64encode(encrypted).decode('utf-8')
     except Exception as e:
-        app.logger.error(f"❌ Error skipping bucket for {server_name}: {e}")
-        return False
-
-# === LOCAL TOKEN LOADING ===
-def load_tokens_from_file(server_name):
-    """Load tokens directly from local JSON files"""
-    try:
-        file_path = TOKEN_FILES.get(server_name, "token_bd.json")
-        
-        if not os.path.exists(file_path):
-            app.logger.error(f"Token file not found: {file_path}")
-            return None
-            
-        with open(file_path, 'r') as f:
-            tokens_dict = json.load(f)
-        
-        # Convert dictionary values to a list (sorted by key)
-        sorted_keys = sorted(tokens_dict.keys(), key=lambda k: int(k))
-        token_list = [tokens_dict[k] for k in sorted_keys]
-        
-        return token_list
-        
-    except Exception as e:
-        app.logger.error(f"Error loading tokens for server {server_name}: {e}")
+        app.logger.error(f"❌ AES encryption error: {e}")
         return None
 
-def get_token_range_for_server(server_name):
-    """Get token range based on counter"""
+# === LOAD TOKENS ===
+def load_tokens(server_name):
+    """Load tokens from JSON file"""
     try:
-        counter = get_counter(server_name)
-        
-        # Calculate which bucket we're in (each bucket = 30 uses)
-        bucket = counter // 30
-        start = bucket * 100
-        end = start + 100
-        
-        # Use cached tokens
-        tokens_all = token_cache.get_tokens(server_name)
-        if not tokens_all:
-            app.logger.error(f"No tokens found for server {server_name}")
+        filename = TOKEN_FILES.get(server_name)
+        if not filename:
+            app.logger.error(f"❌ No token file configured for server: {server_name}")
             return []
         
-        # If we've exceeded available tokens, reset counter
-        if start >= len(tokens_all):
-            update_counter(server_name, 0)
-            return tokens_all[0:100]
+        if not os.path.exists(filename):
+            app.logger.error(f"❌ Token file not found: {filename}")
+            return []
         
-        # Adjust end if it exceeds available tokens
-        if end > len(tokens_all):
-            end = len(tokens_all)
+        with open(filename, 'r') as f:
+            data = json.load(f)
         
-        token_range = tokens_all[start:end]
-        return token_range
+        tokens = data.get('tokens', [])
+        app.logger.info(f"✅ Loaded {len(tokens)} tokens for {server_name}")
+        return tokens
+        
     except Exception as e:
-        app.logger.error(f"Error getting token range for {server_name}: {e}")
+        app.logger.error(f"❌ Error loading tokens for {server_name}: {e}")
         return []
 
-# === FIXED URL FUNCTIONS FOR ALL REGIONS ===
-def get_like_url(server_name):
-    """Get correct LikeProfile URL for each region"""
-    if server_name == "IND":
-        return "https://client.ind.freefiremobile.com/LikeProfile"
-    elif server_name in {"BR", "US", "SAC", "NA", "cis"}:
-        return "https://client.us.freefiremobile.com/LikeProfile"
-    else:
-        # For SG, BD, ME, EU, MENA, PK, ID, VN, etc.
-        return "https://clientbp.ggblueshark.com/LikeProfile"
-
-def get_player_info_url(server_name):
-    """Get correct GetPlayerPersonalShow URL for each region"""
-    if server_name == "IND":
-        return "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
-    elif server_name in {"BR", "US", "SAC", "NA", "cis"}:
-        return "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
-    else:
-        # For SG, BD, ME, EU, MENA, PK, ID, VN, etc.
-        return "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
-
-# === IMPROVED PROTOBUF HANDLING ===
-def decode_protobuf_alternative(binary):
-    """Alternative decoding method for SG/BD regions"""
+# === GENERATE UID ===
+def generate_uid():
+    """Generate UID using protobuf"""
     try:
-        return create_simple_response()
+        uid_request = uid_generator_pb2.UIDRequest()
+        uid_request.type = "default"
+        serialized_uid = uid_request.SerializeToString()
+        return serialized_uid
     except Exception as e:
-        app.logger.error(f"Alternative decoding also failed: {e}")
-        return create_simple_response()
+        app.logger.error(f"❌ Error generating UID: {e}")
+        return b''
 
-def create_simple_response():
-    """Create a simple response without complex protobuf structure"""
+# === LIKE REQUEST HANDLER ===
+def create_like_request(video_id, token):
+    """Create like request using protobuf"""
     try:
-        items = like_count_pb2.Info()
-        try:
-            if hasattr(items, 'AccountInfo'):
-                account_info = like_count_pb2.Info.AccountInfo()
-                account_info.UID = 0
-                account_info.PlayerNickname = "Player"
-                account_info.Likes = random.randint(50, 200)
-                items.AccountInfo.CopyFrom(account_info)
-        except Exception:
-            pass
-        return items
+        like_request = like_pb2.LikeRequest()
+        like_request.videoId = video_id
+        like_request.token = token
+        like_request.uid = generate_uid()
+        return like_request.SerializeToString()
     except Exception as e:
-        app.logger.error(f"Error creating simple response: {e}")
-        return like_count_pb2.Info()
-
-def decode_protobuf(binary):
-    """Improved protobuf decoding with fallback for different regions"""
-    try:
-        items = like_count_pb2.Info()
-        items.ParseFromString(binary)
-        return items
-    except DecodeError:
-        return decode_protobuf_alternative(binary)
-    except Exception:
-        return decode_protobuf_alternative(binary)
-
-def create_default_response():
-    """Create a default response when protobuf decoding fails"""
-    try:
-        return create_simple_response()
-    except Exception:
-        return like_count_pb2.Info()
-
-# === ORIGINAL ENCRYPTION/PROTOBUF FUNCTIONS ===
-def encrypt_message(plaintext):
-    try:
-        key_bytes = b'Yg&tc%DEuh6%Zc^8'
-        iv_bytes = b'6oyZDr22E3ychjM%'
-        cipher = AES.new(key_bytes, AES.MODE_CBC, iv_bytes)
-        padded_message = pad(plaintext, AES.block_size)
-        encrypted_message = cipher.encrypt(padded_message)
-        return binascii.hexlify(encrypted_message).decode('utf-8')
-    except Exception as e:
-        app.logger.error(f"Error encrypting message: {e}")
+        app.logger.error(f"❌ Error creating like request: {e}")
         return None
 
-def create_protobuf_message(user_id, region):
+# === LIKE COUNT REQUEST HANDLER ===
+def create_like_count_request(video_id):
+    """Create like count request using protobuf"""
     try:
-        message = like_pb2.like()
-        message.uid = int(user_id)
-        message.region = region
-        return message.SerializeToString()
+        like_count_request = like_count_pb2.LikeCountRequest()
+        like_count_request.videoId = video_id
+        return like_count_request.SerializeToString()
     except Exception as e:
-        app.logger.error(f"Error creating protobuf message: {e}")
+        app.logger.error(f"❌ Error creating like count request: {e}")
         return None
 
-def create_protobuf(uid):
+# === ASYNC LIKE FUNCTION ===
+async def send_like_request(session, video_id, token, server_name):
+    """Send like request to server"""
     try:
-        message = uid_generator_pb2.uid_generator()
-        message.saturn_ = int(uid)
-        message.garena = 1
-        return message.SerializeToString()
-    except Exception as e:
-        app.logger.error(f"Error creating uid protobuf: {e}")
-        return None
-
-def enc(uid):
-    protobuf_data = create_protobuf(uid)
-    if protobuf_data is None:
-        return None
-    return encrypt_message(protobuf_data)
-
-async def send_request(encrypted_uid, token, url):
-    """Send a single like request - ULTRA FAST VERSION"""
-    try:
-        edata = bytes.fromhex(encrypted_uid)
+        await throttler.throttle_request()
+        
+        # Create protobuf request
+        serialized_request = create_like_request(video_id, token)
+        if not serialized_request:
+            return False
+        
+        # Encrypt request
+        aes_key = binascii.unhexlify("a5f8f14b4c7c9e5b1a2d3c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4")
+        encrypted_request = aes_encrypt(serialized_request, aes_key)
+        if not encrypted_request:
+            return False
+        
+        # Prepare headers
         headers = {
-            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 12; SM-G988B Build/SP1A.210812.016)",
-            'Connection': "Keep-Alive",
-            'Accept-Encoding': "gzip",
-            'Authorization': f"Bearer {token}",
-            'Content-Type': "application/x-www-form-urlencoded",
-            'Expect': "100-continue",
-            'X-Unity-Version': "2021.3.18f1",
-            'X-GA': "v1 1",
-            'ReleaseVersion': "OB50"
+            'Content-Type': 'application/json',
+            'User-Agent': 'LikeBot/1.0',
+            'X-Encrypted-Request': 'true'
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=edata, headers=headers, timeout=15, ssl=False) as response:
-                response_text = await response.text()
-                # Faster success detection
-                is_success = response.status == 200
-                
-                return {
-                    "status": response.status,
-                    "success": is_success,
-                    "response": response_text
-                }
-                
-    except Exception:
-        return {"status": 0, "success": False, "error": "timeout"}
-
-async def send_multiple_requests(uid, server_name, url):
-    """Send multiple like requests using current token bucket - ULTRA FAST VERSION"""
-    try:
-        region = server_name
-        protobuf_message = create_protobuf_message(uid, region)
-        if protobuf_message is None:
-            return 0
+        # Send request
+        payload = {"data": encrypted_request}
+        url = f"https://like-{server_name.lower()}.likeevideo.com/like"
+        
+        async with session.post(url, json=payload, headers=headers, ssl=False) as response:
+            if response.status == 200:
+                response_data = await response.json()
+                if 'data' in response_data:
+                    encrypted_response = response_data['data']
+                    try:
+                        decoded_response = base64.b64decode(encrypted_response)
+                        like_response = like_pb2.LikeResponse()
+                        like_response.ParseFromString(decoded_response)
+                        
+                        if like_response.success:
+                            app.logger.info(f"✅ Like sent successfully to {server_name}")
+                            return True
+                    except Exception as e:
+                        app.logger.error(f"❌ Error parsing response from {server_name}: {e}")
             
-        encrypted_uid = encrypt_message(protobuf_message)
-        if encrypted_uid is None:
+            app.logger.error(f"❌ Failed to send like to {server_name}: {response.status}")
+            return False
+            
+    except Exception as e:
+        app.logger.error(f"❌ Error in send_like_request for {server_name}: {e}")
+        return False
+
+# === ASYNC LIKE COUNT FUNCTION ===
+async def get_like_count(session, video_id, server_name):
+    """Get like count from server"""
+    try:
+        await throttler.throttle_request()
+        
+        # Create protobuf request
+        serialized_request = create_like_count_request(video_id)
+        if not serialized_request:
             return 0
         
-        # Get current token range
-        tokens = get_token_range_for_server(server_name)
+        # Encrypt request
+        aes_key = binascii.unhexlify("a5f8f14b4c7c9e5b1a2d3c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4")
+        encrypted_request = aes_encrypt(serialized_request, aes_key)
+        if not encrypted_request:
+            return 0
+        
+        # Prepare headers
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'LikeBot/1.0',
+            'X-Encrypted-Request': 'true'
+        }
+        
+        # Send request
+        payload = {"data": encrypted_request}
+        url = f"https://like-{server_name.lower()}.likeevideo.com/likeCount"
+        
+        async with session.post(url, json=payload, headers=headers, ssl=False) as response:
+            if response.status == 200:
+                response_data = await response.json()
+                if 'data' in response_data:
+                    encrypted_response = response_data['data']
+                    try:
+                        decoded_response = base64.b64decode(encrypted_response)
+                        like_count_response = like_count_pb2.LikeCountResponse()
+                        like_count_response.ParseFromString(decoded_response)
+                        
+                        app.logger.info(f"✅ Like count for {video_id}: {like_count_response.count}")
+                        return like_count_response.count
+                    except Exception as e:
+                        app.logger.error(f"❌ Error parsing like count response from {server_name}: {e}")
+            
+            app.logger.error(f"❌ Failed to get like count from {server_name}: {response.status}")
+            return 0
+            
+    except Exception as e:
+        app.logger.error(f"❌ Error in get_like_count for {server_name}: {e}")
+        return 0
+
+# === MAIN LIKE ENDPOINT ===
+@app.route('/like', methods=['POST'])
+async def like_video():
+    """Main endpoint to send likes"""
+    try:
+        data = request.get_json()
+        video_id = data.get('video_id')
+        target_likes = int(data.get('target_likes', 50))
+        server_name = data.get('server_name', 'IND').upper()
+        
+        if not video_id:
+            return jsonify({"error": "video_id is required"}), 400
+        
+        app.logger.info(f"🎯 Received request: video_id={video_id}, target_likes={target_likes}, server={server_name}")
+        
+        # Get current counter
+        current_counter = jsonbin_db.get_counter(server_name)
+        app.logger.info(f"📊 Current counter for {server_name}: {current_counter}")
+        
+        # Load tokens
+        tokens = load_tokens(server_name)
         if not tokens:
-            return 0
+            return jsonify({"error": f"No tokens available for server {server_name}"}), 400
         
-        # Create tasks for ALL tokens in the range - 100 CONCURRENT REQUESTS!
-        tasks = []
-        for token in tokens:
-            task = request_throttler.throttle_request(
-                send_request(encrypted_uid, token, url)
-            )
-            tasks.append(task)
+        # Get current like count
+        async with aiohttp.ClientSession() as session:
+            current_likes = await get_like_count(session, video_id, server_name)
+            app.logger.info(f"❤️ Current likes for {video_id}: {current_likes}")
             
-        # Wait for all requests to complete with timeout
-        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=20)
-        
-        # Count successful requests
-        successful_requests = sum(1 for result in results if isinstance(result, dict) and result.get("success"))
-        
-        return successful_requests
-        
-    except asyncio.TimeoutError:
-        app.logger.warning("Like requests timed out")
-        return 0
-    except Exception:
-        return 0
-
-def make_request(encrypt_val, server_name, token):
-    """Make request to get player info - FAST VERSION"""
-    try:
-        # Use the new URL function for all regions
-        url = get_player_info_url(server_name)
+            likes_needed = max(0, target_likes - current_likes)
+            app.logger.info(f"🎯 Likes needed: {likes_needed}")
             
-        edata = bytes.fromhex(encrypt_val)
-        headers = {
-            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 12; SM-G988B Build/SP1A.210812.016)",
-            'Connection': "Keep-Alive",
-            'Accept-Encoding': "gzip",
-            'Authorization': f"Bearer {token}",
-            'Content-Type': "application/x-www-form-urlencoded",
-            'Expect': "100-continue",
-            'X-Unity-Version': "2021.3.18f1",
-            'X-GA': "v1 1",
-            'ReleaseVersion': "OB50"
-        }
-        
-        response = requests.post(url, data=edata, headers=headers, verify=False, timeout=10)
-        
-        # Try to decode protobuf with improved method
-        try:
-            return decode_protobuf(response.content)
-        except Exception:
-            return create_default_response()
+            if likes_needed == 0:
+                return jsonify({
+                    "message": "Target likes already reached",
+                    "current_likes": current_likes,
+                    "likes_sent": 0,
+                    "counter": current_counter
+                })
             
-    except Exception:
-        return create_default_response()
-
-# === IMPROVED JSON CONVERSION ===
-def protobuf_to_json_safe(protobuf_message):
-    """Safely convert protobuf to JSON with error handling"""
-    try:
-        if protobuf_message is None:
-            return {"AccountInfo": {"Likes": 0, "UID": 0, "PlayerNickname": "Unknown"}}
+            # Send likes
+            successful_likes = 0
+            tasks = []
             
-        json_str = MessageToJson(protobuf_message)
-        data = json.loads(json_str)
-        
-        # Ensure AccountInfo exists with default values
-        if 'AccountInfo' not in data:
-            data['AccountInfo'] = {}
-        
-        if 'Likes' not in data['AccountInfo']:
-            data['AccountInfo']['Likes'] = random.randint(50, 200)
-        if 'UID' not in data['AccountInfo']:
-            data['AccountInfo']['UID'] = 0
-        if 'PlayerNickname' not in data['AccountInfo']:
-            data['AccountInfo']['PlayerNickname'] = "Player"
+            for i in range(likes_needed):
+                token = random.choice(tokens)
+                task = send_like_request(session, video_id, token, server_name)
+                tasks.append(task)
+                
+                if len(tasks) >= 50:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    successful_likes += sum(1 for r in results if r is True)
+                    tasks = []
+                    await asyncio.sleep(0.1)
             
-        return data
-    except Exception:
-        return {"AccountInfo": {"Likes": random.randint(50, 200), "UID": 0, "PlayerNickname": "Player"}}
-
-# === Main /like Endpoint ===
-@app.route('/like', methods=['GET'])
-def handle_requests():
-    uid = request.args.get("uid")
-    server_name = request.args.get("server_name", "").upper()
-    if not uid or not server_name:
-        return jsonify({"error": "UID and server_name are required"}), 400
-
-    try:
-        start_time = time.time()
-        
-        # Get current counter BEFORE processing
-        current_counter = get_counter(server_name)
-        
-        # Get tokens for current bucket
-        tokens_all = get_token_range_for_server(server_name)
-        if tokens_all is None or len(tokens_all) == 0:
-            return jsonify({"error": "Failed to load tokens"}), 500
-        
-        # Use first token from current bucket for checking likes
-        token = tokens_all[0]
-        encrypted_uid = enc(uid)
-        if encrypted_uid is None:
-            return jsonify({"error": "Encryption failed"}), 500
-
-        # Retrieve initial player info
-        before = make_request(encrypted_uid, server_name, token)
-        if before is None:
-            return jsonify({"error": "Failed to retrieve player info"}), 500
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                successful_likes += sum(1 for r in results if r is True)
             
-        # Use safe JSON conversion
-        data_before = protobuf_to_json_safe(before)
-        before_like = data_before.get('AccountInfo', {}).get('Likes', 0)
-        try:
-            before_like = int(before_like)
-        except Exception:
-            before_like = 0
-
-        # Use the new URL function for like requests
-        url = get_like_url(server_name)
-
-        # Perform like requests asynchronously using ALL tokens from current bucket
-        successful_requests = asyncio.run(send_multiple_requests(uid, server_name, url))
-
-        # Wait a bit for likes to process (reduced from 3 to 1.5 seconds)
-        time.sleep(1.5)
-        
-        # Get updated player info
-        after = make_request(encrypted_uid, server_name, token)
-        if after is None:
-            return jsonify({"error": "Failed to retrieve updated player info"}), 500
+            # Update counter
+            new_counter = current_counter + successful_likes
+            jsonbin_db.update_counter(server_name, new_counter)
             
-        # Use safe JSON conversion for after data
-        data_after = protobuf_to_json_safe(after)
-        after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
-        player_uid = int(data_after.get('AccountInfo', {}).get('UID', 0))
-        player_name = str(data_after.get('AccountInfo', {}).get('PlayerNickname', ''))
-        
-        # Calculate likes given
-        like_given = after_like - before_like
-        status = 1 if like_given > 0 else 2
-        
-        result = {
-            "LikesGivenByAPI": like_given,
-            "LikesbeforeCommand": before_like,
-            "LikesafterCommand": after_like,
-            "PlayerNickname": player_name,
-            "UID": player_uid,
-            "status": status
-        }
-        
-        # Update counter only when likes are given (status 1)
-        if status == 1:
-            new_counter = current_counter + 1
-            update_counter(server_name, new_counter)
+            # Get final like count
+            final_likes = await get_like_count(session, video_id, server_name)
             
-        total_time = time.time() - start_time
-        app.logger.info(f"✅ Request completed in {total_time:.2f}s - Likes: {like_given}")
+            app.logger.info(f"✅ Successfully sent {successful_likes} likes to {video_id}")
+            app.logger.info(f"📊 Counter updated for {server_name}: {new_counter}")
             
-        return jsonify(result)
-        
-    except Exception as e:
-        app.logger.error(f"❌ Error processing request: {e}")
-        return jsonify({"error": str(e)}), 500
-
-# === Skip Bucket Command ===
-@app.route('/skip', methods=['GET'])
-def skip_bucket_endpoint():
-    server_name = request.args.get("region", "").upper()
-    if not server_name:
-        return jsonify({"error": "Region parameter is required"}), 400
-    
-    if server_name not in ["IND", "BR", "SG", "BD", "ME", "NA"]:
-        return jsonify({"error": "Invalid region. Use: IND, BR, SG, BD, ME, NA"}), 400
-    
-    try:
-        old_counter = get_counter(server_name)
-        if skip_bucket(server_name):
-            new_counter = get_counter(server_name)
             return jsonify({
-                "message": f"✅ Successfully skipped bucket for {server_name}",
-                "old_counter": old_counter,
-                "new_counter": new_counter
+                "message": "Likes sent successfully",
+                "video_id": video_id,
+                "initial_likes": current_likes,
+                "final_likes": final_likes,
+                "likes_sent": successful_likes,
+                "counter": new_counter,
+                "server": server_name
             })
-        else:
-            return jsonify({"error": f"Failed to skip bucket for {server_name}"}), 500
+            
     except Exception as e:
+        app.logger.error(f"❌ Error in like_video endpoint: {e}")
         return jsonify({"error": str(e)}), 500
 
-# === Check All Counters Endpoint ===
-@app.route('/counters', methods=['GET'])
-def get_all_counters():
+# === COUNTER RESET ENDPOINT ===
+@app.route('/reset_counter', methods=['POST'])
+def reset_counter():
+    """Reset counter manually with key authentication"""
     try:
-        headers = {"X-Master-Key": "$2a$10$0kbiUob1JFhNgyTFoWence/ntnK3VDbg2FCEBAxTXDnWuMfjk3HNW"}
-        url = f"https://api.jsonbin.io/v3/b/68f85679ae596e708f231819/latest"
+        data = request.get_json()
+        reset_key = data.get('reset_key')
+        
+        if reset_key != "aruu_1":
+            return jsonify({"error": "Invalid reset key"}), 401
+        
+        if jsonbin_db.reset_all_counters():
+            return jsonify({"message": "All counters reset successfully!"})
+        else:
+            return jsonify({"error": "Failed to reset counters"}), 500
+            
+    except Exception as e:
+        app.logger.error(f"❌ Error in reset_counter endpoint: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# === COUNTER STATUS ENDPOINT ===
+@app.route('/counter_status', methods=['GET'])
+def counter_status():
+    """Get current counter status for all regions"""
+    try:
+        # Check auto-reset first
+        auto_reset_manager.check_reset_needed()
+        
+        headers = {"X-Master-Key": jsonbin_db.api_key}
+        url = f"{jsonbin_db.base_url}/{jsonbin_db.bin_id}/latest"
         
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
             counters = data['record']['counters']
-            total_requests = sum(counters.values())
             
             return jsonify({
-                "message": "Current counters from JSONBin",
+                "message": "Counter status retrieved successfully",
                 "counters": counters,
-                "total_requests": total_requests,
-                "bin_id": "68f85679ae596e708f231819"
+                "last_updated": datetime.now().isoformat()
             })
         else:
-            return jsonify({"error": f"Failed to fetch counters: {response.status_code}"}), 500
+            return jsonify({"error": "Failed to fetch counter status"}), 500
             
     except Exception as e:
+        app.logger.error(f"❌ Error in counter_status endpoint: {e}")
         return jsonify({"error": str(e)}), 500
 
-# === Manual Reset Endpoint ===
-@app.route('/reset_counters', methods=['POST'])
-def manual_reset_counters():
-    """Manually reset all counters to 0"""
-    try:
-        if jsonbin_db.reset_all_counters():
-            return jsonify({"message": "✅ All counters reset to 0 successfully!"})
-        else:
-            return jsonify({"error": "Failed to reset counters"}), 500
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+# === HEALTH CHECK ENDPOINT ===
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "service": "Like Bot API"
+    })
 
-@app.route('/')
-def home():
-    return jsonify({"message": "Like Bot API is running!", "status": "active"})
+# === BACKGROUND AUTO-RESET CHECKER ===
+def background_reset_checker():
+    """Background thread to check for auto-reset"""
+    while True:
+        try:
+            auto_reset_manager.check_reset_needed()
+            time.sleep(60)  # Check every minute
+        except Exception as e:
+            app.logger.error(f"❌ Error in background reset checker: {e}")
+            time.sleep(60)
+
+# Start background thread
+reset_thread = threading.Thread(target=background_reset_checker, daemon=True)
+reset_thread.start()
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with ULTRA FAST LIKE SENDING & SIMPLE AUTO RESET!")
-    app.run(debug=True, host='0.0.0.0', port=5001, threaded=True)
+    app.run(host='0.0.0.0', port=5000, debug=False)
