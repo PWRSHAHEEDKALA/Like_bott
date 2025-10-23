@@ -27,24 +27,105 @@ import random
 
 app = Flask(__name__)
 
-# === SIMPLE AUTO RESET COUNTER SYSTEM ===
+# === FIXED AUTO RESET COUNTER SYSTEM ===
 class AutoResetManager:
     def __init__(self):
-        self.last_reset_date = None
-        self.check_reset_needed()
+        self.api_key = "$2a$10$0kbiUob1JFhNgyTFoWence/ntnK3VDbg2FCEBAxTXDnWuMfjk3HNW"
+        self.bin_id = "68f85679ae596e708f231819"
+        self.base_url = "https://api.jsonbin.io/v3/b"
+        self.last_reset_date = self.get_current_reset_date()
+        self.start_background_checker()
+        
+    def get_current_reset_date(self):
+        """Get the current reset date from JSONBin or use yesterday's date to avoid immediate reset"""
+        try:
+            # Try to get last reset date from JSONBin
+            headers = {"X-Master-Key": self.api_key}
+            url = f"{self.base_url}/{self.bin_id}/latest"
+            
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if 'last_reset_date' in data['record']:
+                    return data['record']['last_reset_date']
+        except Exception as e:
+            app.logger.error(f"Error getting last reset date: {e}")
+        
+        # If no saved date, use yesterday's date to avoid immediate reset
+        india_tz = pytz.timezone('Asia/Kolkata')
+        yesterday = datetime.now(india_tz).date() - timedelta(days=1)
+        return yesterday.isoformat()
+    
+    def start_background_checker(self):
+        """Start background thread to check for reset every 30 seconds"""
+        def checker_loop():
+            while True:
+                try:
+                    self.check_reset_needed()
+                    time.sleep(30)  # Check every 30 seconds
+                except Exception as e:
+                    app.logger.error(f"Error in background checker: {e}")
+                    time.sleep(60)  # Wait longer if error occurs
+        
+        checker_thread = threading.Thread(target=checker_loop, daemon=True)
+        checker_thread.start()
+        app.logger.info("🕐 Background reset checker started (every 30 seconds)")
+    
+    def save_reset_date(self, date_str):
+        """Save the reset date to JSONBin"""
+        try:
+            # First get current data
+            headers = {"X-Master-Key": self.api_key}
+            url = f"{self.base_url}/{self.bin_id}/latest"
+            
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                current_data = data['record']
+            else:
+                current_data = {"counters": {"IND": 0, "BR": 0, "SG": 0, "BD": 0, "ME": 0, "NA": 0}}
+            
+            # Update the reset date
+            current_data['last_reset_date'] = date_str
+            
+            # Update the bin
+            update_headers = {
+                "Content-Type": "application/json",
+                "X-Master-Key": self.api_key
+            }
+            
+            update_url = f"{self.base_url}/{self.bin_id}"
+            update_response = requests.put(update_url, json=current_data, headers=update_headers, timeout=10)
+            
+            if update_response.status_code == 200:
+                app.logger.info(f"✅ Reset date saved: {date_str}")
+                return True
+        except Exception as e:
+            app.logger.error(f"Error saving reset date: {e}")
+        return False
         
     def check_reset_needed(self):
-        """Check if reset is needed and perform it"""
+        """Check if reset is needed and perform it ONLY at 4:30 AM India time"""
         try:
             india_tz = pytz.timezone('Asia/Kolkata')
             now = datetime.now(india_tz)
-            current_date = now.date()
+            current_date = now.date().isoformat()
             
-            # Check if it's 4:30 AM or later and we haven't reset today
-            if (now.hour >= 4 and now.minute >= 30) and (self.last_reset_date != current_date):
-                self.reset_all_counters()
-                self.last_reset_date = current_date
-                app.logger.info(f"✅ Auto-reset performed at {now}")
+            # Check if it's 4:30 AM or later AND we haven't reset today
+            reset_time = dt_time(4, 30)  # 4:30 AM
+            should_reset = (now.time() >= reset_time) and (self.last_reset_date != current_date)
+            
+            if should_reset:
+                app.logger.info(f"🕟 Reset condition met: Current time {now}, Last reset: {self.last_reset_date}")
+                if self.reset_all_counters():
+                    self.last_reset_date = current_date
+                    # Save the reset date to JSONBin so it persists after restart
+                    self.save_reset_date(current_date)
+                    app.logger.info(f"✅ Auto-reset performed at {now}")
+                else:
+                    app.logger.error("❌ Failed to perform auto-reset")
+            # else:
+            #     app.logger.info(f"⏰ No reset needed: Current time {now.time()}, Last reset: {self.last_reset_date}")
                 
         except Exception as e:
             app.logger.error(f"❌ Error in auto-reset check: {e}")
@@ -52,14 +133,17 @@ class AutoResetManager:
     def reset_all_counters(self):
         """Reset all counters to 0"""
         try:
-            reset_data = {"counters": {"IND": 0, "BR": 0, "SG": 0, "BD": 0, "ME": 0, "NA": 0}}
+            reset_data = {
+                "counters": {"IND": 0, "BR": 0, "SG": 0, "BD": 0, "ME": 0, "NA": 0},
+                "last_reset_date": self.last_reset_date
+            }
             
             update_headers = {
                 "Content-Type": "application/json",
-                "X-Master-Key": "$2a$10$0kbiUob1JFhNgyTFoWence/ntnK3VDbg2FCEBAxTXDnWuMfjk3HNW"
+                "X-Master-Key": self.api_key
             }
             
-            update_url = "https://api.jsonbin.io/v3/b/68f85679ae596e708f231819"
+            update_url = f"{self.base_url}/{self.bin_id}"
             response = requests.put(update_url, json=reset_data, headers=update_headers, timeout=10)
             
             if response.status_code == 200:
@@ -699,5 +783,6 @@ def home():
     return jsonify({"message": "Like Bot API is running!", "status": "active"})
 
 if __name__ == '__main__':
-    app.logger.info("🚀 Server started with ULTRA FAST LIKE SENDING & SIMPLE AUTO RESET!")
+    app.logger.info("🚀 Server started with FIXED AUTO RESET SYSTEM!")
+    app.logger.info(f"📅 Last reset date: {auto_reset_manager.last_reset_date}")
     app.run(debug=True, host='0.0.0.0', port=5001, threaded=True)
